@@ -3086,7 +3086,7 @@ function CENSUS_r6r6FinishPre_(out) {
 // ================================================================================================================
 var R6R6_FROZEN_BEFORE_ = {
   captured_from: 'RUN_R6R6_MANUAL_ROUTE_SAVE_PREFLIGHT (production, read-only, db_writes 0)',
-  captured_for_build: 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R6',
+  captured_for_build: 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R6-R1',
   verdict: 'EXACTLY_ONE_SAVE_TARGET',
   db_writes: 0,
 
@@ -3111,21 +3111,35 @@ var R6R6_FROZEN_BEFORE_ = {
   expected_arrival: '',                   // blank because it waits for the last mile
   k4_group_key: '|resus|us|amazon|inventory_replenishment|wh-tw-cn-factory-youxin|marketplace|amazon|sea_express||',
 
-  // NOT PRESENT in the captured output. Enforced as invariants, and named as gaps in the verdict.
-  status: null,
-  generation_type: null,
-  ownership: null,
+  // EQUALITY gates, from the production preflight. An invariant gate standing in for an equality gate that can
+  // be written is strictly weaker: 'still ACTIVE' accepts three statuses, and this accepts one.
+  status: 'draft',
+  generation_type: 'user_created',
+  ownership: 'MANUAL (no generation_run_id — composed by a person)',
+  // The two timestamps the write path MOVES. They are in the allowed set, so they are frozen for the record
+  // and never compared for equality — freezing a value that is required to change would be a gate that fires
+  // on every correct run.
   updated_at: null,
   line_updated_at: null,
 
   // The plan this row sits in. A completion must not change the shape of it.
   header_count: 2,
   line_count: 2,
-  // The other visible row, frozen by the identity and quantity the live provenance states. Its remaining
-  // fields were not captured, so drift in them is REPORTED rather than claimed to be impossible — see
-  // `other_row_guarantee` in the verdict.
+  // THE OTHER VISIBLE ROW. Every field below is a value the production evidence states; the fields the
+  // evidence in hand does NOT state are absent rather than guessed, and each absent field is reported in
+  // `other_row_snapshot_gaps` on every verdict. A guessed `shipping_method` would produce a STOP that means
+  // nothing, and a STOP that means nothing is the blocker this whole round exists to remove.
   other_rows: [
-    { allocation_draft_id: 'SADH-K4-A3872518', allocation_draft_line_id: 'SADL-K2-344FB2B2', quantity: 200 }
+    {
+      allocation_draft_id: 'SADH-K4-A3872518',
+      allocation_draft_line_id: 'SADL-K2-344FB2B2',
+      sku: 'CO1100-R',
+      company: 'resus',
+      country: 'us',
+      station_marketplace: 'amazon',
+      quantity: 200,
+      destination_kind: 'warehouse'
+    }
   ],
 
   allowed_mutation_fields: ['last_mile_delivery', 'expected_arrival', 'draft_version', 'updated_at', 'line_updated_at'],
@@ -3141,10 +3155,13 @@ var R6R6_FROZEN_REQUIRED_FIELDS_ = ['allocation_draft_id', 'allocation_draft_lin
   'company', 'country', 'station_marketplace', 'sku', 'source_warehouse_id', 'destination_kind', 'destination_id',
   'quantity', 'shipping_method', 'last_mile_delivery', 'expected_arrival', 'k4_group_key',
   'header_count', 'line_count', 'allowed_mutation_fields', 'forbidden_mutation_fields'];
-// Fields the capture did not carry. Each has an invariant gate below instead of an equality gate.
-var R6R6_FROZEN_INVARIANT_FIELDS_ = ['status', 'generation_type', 'ownership'];
-// The statuses under which a route is still part of the current plan (KMARC's ACTIVE set). A completion must
-// never move a row out of it.
+// The three fields that were briefly enforced as invariants because I recorded them as uncaptured. They are
+// captured, so they are EQUALITY gates, and this list is what makes their absence a STOP rather than a
+// silently weaker check. `snapshot_gaps` must be empty for the frozen readback to proceed at all.
+var R6R6_FROZEN_EQUALITY_FIELDS_ = ['status', 'generation_type', 'ownership'];
+// The statuses under which a route is still part of the current plan (KMARC's ACTIVE set). Kept as a SECOND,
+// weaker gate beside the equality check above — it costs nothing and it still refuses a row that has left
+// the plan even if a future freeze omits `status`.
 var R6R6_ACTIVE_STATUSES_ = ['draft', 'site_confirmed', 'partially_submitted'];
 
 function CENSUS_r6r6SnapshotIssues_(snap) {
@@ -3159,6 +3176,12 @@ function CENSUS_r6r6SnapshotIssues_(snap) {
   }
   if (CENSUS_str_(snap.last_mile_delivery) !== '') {
     issues.push('the frozen last mile is NOT blank, so this snapshot does not describe a route awaiting completion');
+  }
+  // An equality field with no frozen value is a gap, and a gap is a STOP: the readback would otherwise fall
+  // through to a weaker invariant and report a confirmation it cannot support.
+  for (var ei = 0; ei < R6R6_FROZEN_EQUALITY_FIELDS_.length; ei++) {
+    var ek = R6R6_FROZEN_EQUALITY_FIELDS_[ei];
+    if (snap[ek] === null || snap[ek] === undefined) issues.push('missing required field: ' + ek);
   }
   var seg = CENSUS_str_(snap.k4_group_key).split('|');
   if (seg.length !== 11) issues.push('the frozen K4 key does not have the 11 segments the contract defines');
@@ -3176,6 +3199,157 @@ function CENSUS_r6r6K4WithLastMile_(k4, lastMile) {
   return seg.join('|');
 }
 
+// ----------------------------------------------------------------------------------------------------------------
+// F1-7N-FC-1B-E3-R4-A2-R1-R6-R6-R1 §7 — IS THE FROZEN BEFORE STILL THE PRESENT?
+//
+// A frozen snapshot is only a BEFORE for as long as the database still agrees with it. Between the capture and
+// the operator's click anything could have moved — another session's save, a Submit, a cancel — and a readback
+// run against a stale freeze would compare the AFTER against a world that no longer existed, then report
+// whichever difference that produced as though the authorized action had caused it.
+//
+// So this is run BEFORE the click, and it answers one question: does production still look exactly like the
+// frozen BEFORE? It is the same comparison the readback performs, with the ONE difference that matters — the
+// last mile must still be BLANK and the version must still be the frozen one, because nothing has happened yet.
+//
+// Read-only, and it reaches the database through the same census as everything else.
+// ----------------------------------------------------------------------------------------------------------------
+// Field-by-field drift between a frozen row and a live one, over the fields the frozen row actually carries.
+// Returns the drift and the list of fields it could not compare — never a bare boolean, because "unchanged"
+// and "not checked" are the two answers this whole contract exists to keep apart.
+function CENSUS_r6r6DiffRow_(frozen, live, fields) {
+  var drift = [], uncompared = [];
+  for (var i = 0; i < fields.length; i++) {
+    var k = fields[i];
+    if (frozen[k] === null || frozen[k] === undefined) { uncompared.push(k); continue; }
+    var bv = CENSUS_str_(frozen[k]), av = CENSUS_str_(live[k]);
+    if (R6R6_CASE_INSENSITIVE_FIELDS_.indexOf(k) !== -1) { bv = bv.toLowerCase(); av = av.toLowerCase(); }
+    if (bv !== av) drift.push({ field: k, frozen: bv, live: av });
+  }
+  return { drift: drift, uncompared: uncompared };
+}
+
+function RUN_R6R6_MANUAL_ROUTE_SAVE_FROZEN_READINESS() {
+  var snap = R6R6_FROZEN_BEFORE_;
+  var out = {
+    census: 'RUN_R6R6_MANUAL_ROUTE_SAVE_FROZEN_READINESS',
+    build: TEMP_E3_CENSUS_BUILD_,
+    read_only: true, db_writes: 0, writer_constructed: false, submit_calls: 0, reservation_writes: 0,
+    carrier_master_data_writes: 0,
+    snapshot_issues: [], snapshot_gaps: [], other_row_snapshot_gaps: [],
+    target_ids: null,
+    target_present: false, draft_version_live: null, last_mile_live: null,
+    route_a_drift: [], route_b_drift: [], missing_other_rows: [],
+    header_count_frozen: null, header_count_live: null,
+    line_count_frozen: null, line_count_live: null,
+    verdict: 'STOP', stop_reason: ''
+  };
+  // 1. THE SNAPSHOT ITSELF. A freeze that is not usable cannot certify anything about production.
+  out.snapshot_issues = CENSUS_r6r6SnapshotIssues_(snap) || [];
+  for (var gi = 0; gi < R6R6_FROZEN_EQUALITY_FIELDS_.length; gi++) {
+    var gk = R6R6_FROZEN_EQUALITY_FIELDS_[gi];
+    if (snap[gk] === null || snap[gk] === undefined) out.snapshot_gaps.push(gk);
+  }
+  if (out.snapshot_issues.length || out.snapshot_gaps.length) {
+    out.stop_reason = 'the frozen BEFORE snapshot is not usable: '
+      + out.snapshot_issues.concat(out.snapshot_gaps.map(function (k) { return 'missing required field: ' + k; })).join('; ');
+    return CENSUS_r6r6FinishReady_(out);
+  }
+  out.target_ids = { allocation_draft_id: snap.allocation_draft_id,
+    allocation_draft_line_id: snap.allocation_draft_line_id };
+
+  var res = RUN_R6R2_ROUTE_PROVENANCE();
+  if (res.error) { out.stop_reason = 'the census itself failed: ' + CENSUS_str_(res.error); return CENSUS_r6r6FinishReady_(out); }
+  out.db_writes = CENSUS_num_(res.db_writes) || 0;
+  out.writer_constructed = res.writer_constructed === true;
+  out.submit_calls = CENSUS_num_(res.submit_calls) || 0;
+  out.reservation_writes = CENSUS_num_(res.reservation_writes) || 0;
+  var rows = res.visible_route_rows || [];
+  out.header_count_frozen = CENSUS_num_(snap.header_count);
+  out.line_count_frozen = CENSUS_num_(snap.line_count);
+  out.header_count_live = (res.sku_contributing_header_ids || []).length;
+  out.line_count_live = (res.sku_contributing_line_ids || []).length;
+
+  // 2. ROUTE A, located by the identity it was frozen with.
+  var a = null;
+  for (var i = 0; i < rows.length; i++) {
+    if (CENSUS_str_(rows[i].allocation_draft_id) === CENSUS_str_(snap.allocation_draft_id) &&
+        CENSUS_str_(rows[i].allocation_draft_line_id) === CENSUS_str_(snap.allocation_draft_line_id)) { a = rows[i]; break; }
+  }
+  out.target_present = !!a;
+  if (!a) {
+    out.stop_reason = 'the frozen target row is not present in production. The freeze describes a plan that has'
+      + ' changed; re-freeze before doing anything.';
+    return CENSUS_r6r6FinishReady_(out);
+  }
+  out.draft_version_live = CENSUS_str_(a.draft_version);
+  out.last_mile_live = CENSUS_str_(a.last_mile_delivery);
+
+  // 3. NOTHING HAS HAPPENED YET, and that is what separates this from the readback: the last mile must still
+  //    be blank and the version must still be the one that was frozen.
+  var eqFields = R6R6_FORBIDDEN_MUTATION_FIELDS_.concat(R6R6_DERIVED_MUTATION_FIELDS_)
+    .concat(['last_mile_delivery', 'expected_arrival']);
+  var dA = CENSUS_r6r6DiffRow_(snap, a, eqFields);
+  out.route_a_drift = dA.drift;
+
+  // 4. EVERY OTHER FROZEN ROW, over the fields it carries.
+  var others = snap.other_rows || [];
+  for (var oi = 0; oi < others.length; oi++) {
+    var ob = others[oi], oa = null;
+    for (var oj = 0; oj < rows.length; oj++) {
+      if (CENSUS_str_(rows[oj].allocation_draft_id) === CENSUS_str_(ob.allocation_draft_id) &&
+          CENSUS_str_(rows[oj].allocation_draft_line_id) === CENSUS_str_(ob.allocation_draft_line_id)) { oa = rows[oj]; break; }
+    }
+    if (!oa) { out.missing_other_rows.push(CENSUS_str_(ob.allocation_draft_id)); continue; }
+    var dB = CENSUS_r6r6DiffRow_(ob, oa, eqFields.concat(['quantity']));
+    for (var di = 0; di < dB.drift.length; di++) {
+      out.route_b_drift.push({ allocation_draft_id: ob.allocation_draft_id, field: dB.drift[di].field,
+        frozen: dB.drift[di].frozen, live: dB.drift[di].live });
+    }
+    for (var ui = 0; ui < dB.uncompared.length; ui++) {
+      var gapKey = CENSUS_str_(ob.allocation_draft_id) + '.' + dB.uncompared[ui];
+      if (out.other_row_snapshot_gaps.indexOf(gapKey) === -1) out.other_row_snapshot_gaps.push(gapKey);
+    }
+  }
+
+  // 5. THE VERDICT. Ordered so the reason an operator reads is the FIRST thing that is wrong, not the last.
+  var countsMatch = (out.header_count_frozen === out.header_count_live)
+    && (out.line_count_frozen === out.line_count_live);
+  if (CENSUS_str_(a.draft_version) !== CENSUS_str_(snap.expected_draft_version)) {
+    out.stop_reason = 'draft_version in production is ' + out.draft_version_live + ', and the freeze expects '
+      + CENSUS_str_(snap.expected_draft_version) + '. Something has written to this row since the capture.';
+  } else if (out.last_mile_live !== '') {
+    out.stop_reason = 'the last mile is already set to "' + out.last_mile_live + '". This row is not awaiting'
+      + ' completion any more, so the authorized action does not apply to it.';
+  } else if (out.route_a_drift.length) {
+    out.stop_reason = 'Route A has drifted from the freeze on: '
+      + out.route_a_drift.map(function (x) { return x.field; }).join(', ');
+  } else if (out.missing_other_rows.length) {
+    out.stop_reason = 'a frozen companion route is gone: ' + out.missing_other_rows.join(', ');
+  } else if (out.route_b_drift.length) {
+    out.stop_reason = 'a companion route has drifted from the freeze on: '
+      + out.route_b_drift.map(function (x) { return x.allocation_draft_id + '.' + x.field; }).join(', ');
+  } else if (!countsMatch) {
+    out.stop_reason = 'the plan shape has changed: headers ' + out.header_count_frozen + ' -> '
+      + out.header_count_live + ', lines ' + out.line_count_frozen + ' -> ' + out.line_count_live + '.';
+  } else if (out.db_writes !== 0 || out.writer_constructed || out.submit_calls !== 0 || out.reservation_writes !== 0) {
+    out.stop_reason = 'this read reported a non-zero write counter, which a read-only census must never do.';
+  }
+  out.verdict = out.stop_reason ? 'STOP' : 'FROZEN_READBACK_READY';
+  return CENSUS_r6r6FinishReady_(out);
+}
+
+function CENSUS_r6r6FinishReady_(out) {
+  out.read_only = true;
+  CENSUS_log_('r6r6_readiness_verdict', out.verdict + (out.stop_reason ? ' — ' + out.stop_reason : ''));
+  CENSUS_log_('r6r6_readiness_target', CENSUS_str_(out.target_ids && out.target_ids.allocation_draft_id)
+    + ' :: ' + CENSUS_str_(out.target_ids && out.target_ids.allocation_draft_line_id));
+  CENSUS_log_('r6r6_readiness_version_live', CENSUS_str_(out.draft_version_live));
+  CENSUS_log_('r6r6_readiness_last_mile_live', '"' + CENSUS_str_(out.last_mile_live) + '"');
+  CENSUS_log_('r6r6_readiness_snapshot_gaps', JSON.stringify(out.snapshot_gaps));
+  CENSUS_log_('r6r6_readiness_other_row_gaps', JSON.stringify(out.other_row_snapshot_gaps));
+  CENSUS_log_('r6r6_readiness_db_writes', String(out.db_writes));
+  return out;
+}
 // ----------------------------------------------------------------------------------------------------------------
 // THE NO-ARGUMENT ENTRY POINT. Run it from the editor AFTER the one authorized UI change. It reads; it never
 // writes; and it answers NARROW_MUTATION_CONFIRMED or it answers STOP with the reason.
@@ -3252,8 +3426,8 @@ function RUN_R6R6_MANUAL_ROUTE_SAVE_READBACK(before) {
   // A field the BEFORE never captured cannot be an equality gate. It is listed, and it is covered by an
   // invariant gate further down instead — never silently treated as unchanged, and never treated as changed.
   out.snapshot_gaps = [];
-  for (var gi = 0; gi < R6R6_FROZEN_INVARIANT_FIELDS_.length; gi++) {
-    var gk = R6R6_FROZEN_INVARIANT_FIELDS_[gi];
+  for (var gi = 0; gi < R6R6_FROZEN_EQUALITY_FIELDS_.length; gi++) {
+    var gk = R6R6_FROZEN_EQUALITY_FIELDS_[gi];
     if (b[gk] === null || b[gk] === undefined) out.snapshot_gaps.push(gk);
   }
   var fields = R6R6_ALLOWED_MUTATION_FIELDS_.concat(R6R6_FORBIDDEN_MUTATION_FIELDS_)
@@ -3272,6 +3446,7 @@ function RUN_R6R6_MANUAL_ROUTE_SAVE_READBACK(before) {
   // Route B and every other visible row, compared field by field against its own frozen copy.
   var otherBefore = before.other_rows || [], drift = [];
   out.other_row_uncompared_fields = {};
+  out.other_row_snapshot_gaps = [];
   for (var oi = 0; oi < otherBefore.length; oi++) {
     var ob = otherBefore[oi], oa = null;
     for (var oj = 0; oj < rows.length; oj++) {
@@ -3292,7 +3467,12 @@ function RUN_R6R6_MANUAL_ROUTE_SAVE_READBACK(before) {
       var kk = fields[ok];
       // Only fields the frozen row actually CARRIES are compared. A field it never captured is not evidence
       // of stability and must not be reported as drift the moment the census returns a value for it.
-      if (ob[kk] === null || ob[kk] === undefined) { out.other_row_uncompared_fields[kk] = 1; continue; }
+      if (ob[kk] === null || ob[kk] === undefined) {
+        out.other_row_uncompared_fields[kk] = 1;
+        var gapKey = CENSUS_str_(ob.allocation_draft_id) + '.' + kk;
+        if (out.other_row_snapshot_gaps.indexOf(gapKey) === -1) out.other_row_snapshot_gaps.push(gapKey);
+        continue;
+      }
       var obv = CENSUS_str_(ob[kk]), oav = CENSUS_str_(oa[kk]);
       if (R6R6_CASE_INSENSITIVE_FIELDS_.indexOf(kk) !== -1) { obv = obv.toLowerCase(); oav = oav.toLowerCase(); }
       if (obv !== oav) {

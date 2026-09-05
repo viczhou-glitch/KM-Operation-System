@@ -628,7 +628,8 @@ eq(snapIssues(null), ['the frozen snapshot constant is absent'], 'R5  an absent 
 var PROD_HEADER = { allocation_draft_id: 'SADH-K4-38523A90', company: 'ResUS', country: 'US',
   marketplace: 'Amazon', status: 'draft', destination_marketplace: 'Amazon',
   recommended_source_warehouse_id: 'WH-TW-CN-FACTORY-YOUXIN', recommended_shipping_method: 'sea_express',
-  recommended_last_mile_delivery: '', draft_version: 1, updated_at: '2026-09-05 10:00:00' };
+  recommended_last_mile_delivery: '', draft_version: 1, generation_type: 'user_created',
+  updated_at: '2026-09-05 10:00:00' };
 var PROD_LINE = { allocation_draft_line_id: 'SADL-K2-92B8BAD2', allocation_draft_id: 'SADH-K4-38523A90',
   sku: SKU, planned_qty: 320, line_status: 'draft', source_warehouse_id: 'WH-TW-CN-FACTORY-YOUXIN',
   destination_kind: 'MARKETPLACE', destination_marketplace: 'Amazon', expected_arrival: '',
@@ -636,7 +637,8 @@ var PROD_LINE = { allocation_draft_line_id: 'SADL-K2-92B8BAD2', allocation_draft
 var PROD_B_HEADER = { allocation_draft_id: 'SADH-K4-A3872518', company: 'ResUS', country: 'US',
   marketplace: 'Amazon', status: 'draft', recommended_destination_warehouse_id: 'WH-AMZLGS-IN',
   recommended_source_warehouse_id: 'WH-TW-CN-FACTORY-YOUXIN', recommended_shipping_method: 'air',
-  recommended_last_mile_delivery: 'PARCEL', draft_version: 2, updated_at: '2026-09-01 09:00:00' };
+  recommended_last_mile_delivery: 'PARCEL', draft_version: 2, generation_type: 'user_created',
+  updated_at: '2026-09-01 09:00:00' };
 var PROD_B_LINE = { allocation_draft_line_id: 'SADL-K2-344FB2B2', allocation_draft_id: 'SADH-K4-A3872518',
   sku: SKU, planned_qty: 200, line_status: 'draft', source_warehouse_id: 'WH-TW-CN-FACTORY-YOUXIN',
   destination_kind: 'WAREHOUSE', destination_warehouse_id: 'WH-AMZLGS-IN', expected_arrival: '2026-09-20',
@@ -667,10 +669,16 @@ eq([OKR.read_only, OKR.db_writes, OKR.writer_constructed, OKR.submit_calls, OKR.
 eq(OKR.draft_version_before + '->' + OKR.draft_version_after, '1->2', 'R6c the version advanced by exactly one');
 eq(OKR.k4_actual_after, OKR.k4_expected_after, 'R6d the K4 key is the frozen key with only the last mile moved');
 eq(OKR.last_mile_absorbed_by_identity, true, 'R6e and the identity absorbed the value, which is what makes it valid');
-eq(OKR.snapshot_gaps, ['status', 'generation_type', 'ownership'],
-  'R6f the three fields the capture did not carry are NAMED, not silently treated as unchanged');
+// R6-R6-R1 CORRECTION. I recorded status / generation_type / ownership as absent from the production
+// capture. They were present, and an invariant gate standing in for an equality gate that CAN be written is
+// strictly weaker: 'still ACTIVE' accepts three statuses where the frozen value accepts one.
+eq(OKR.snapshot_gaps, [], 'R6f no Route A field falls back to an invariant \u2014 every one is frozen exactly');
 eq([OKR.status_still_active, OKR.ownership_still_manual], [true, true],
-  'R6g and each is covered by an invariant gate instead');
+  'R6g the weaker gates are kept as a second line, and they agree');
+ok(/status: 'draft'/.test(FROZEN) && /generation_type: 'user_created'/.test(FROZEN),
+  'R6f1 the frozen values are the production ones');
+ok(/ownership: 'MANUAL \(no generation_run_id/.test(FROZEN),
+  'R6f2 including the ownership string the census itself emits');
 eq([OKR.header_count_before, OKR.header_count_after, OKR.line_count_before, OKR.line_count_after], [2, 2, 2, 2],
   'R6h with the plan shape unchanged');
 ok(/other routes compared/.test(OKR.other_row_guarantee),
@@ -703,9 +711,16 @@ stops('R7e the row left the ACTIVE statuses',
   { aHeader: { recommended_last_mile_delivery: 'TRUCK', draft_version: 2, status: 'cancelled' },
     aLine: { expected_arrival: '2026-10-15' } }, 'NOT PRESENT|ACTIVE');
 // 7. ownership became AI
-stops('R7f the row became AI-owned',
+// Caught by the frozen EQUALITY gate now, not by the weaker must-not-be-AI-owned invariant: ownership is a
+// value the snapshot pins, so a change to it is a forbidden-field change. The invariant is kept as a second
+// line and is asserted separately, so the two cannot silently disagree.
+var AIOWNED = stops('R7f the row became AI-owned',
   { aHeader: { recommended_last_mile_delivery: 'TRUCK', draft_version: 2, generation_run_id: 'RUN-1' },
-    aLine: { expected_arrival: '2026-10-15' } }, 'AI-owned');
+    aLine: { expected_arrival: '2026-10-15' } }, 'outside the allowed set');
+ok(AIOWNED.unexpected_changed_fields.indexOf('ownership') !== -1,
+  'R7f1 naming ownership, whose exact BEFORE value is frozen');
+eq(AIOWNED.ownership_still_manual, false,
+  'R7f2 and the weaker invariant agrees, so the two lines do not contradict each other');
 // 8. an unauthorized route changed
 stops('R7g Route B drifted', { aHeader: GOOD.aHeader, aLine: GOOD.aLine, bLine: { planned_qty: 111 } },
   'another visible route drifted');
@@ -792,20 +807,113 @@ mut('R-M3 the snapshot-completeness gate dropped → an incomplete BEFORE is use
   // With no id to locate by, the mutant cannot even find the row — it must not report a confirmation.
   return r.verdict !== 'NARROW_MUTATION_CONFIRMED' && !/not usable/.test(r.stop_reason || '');
 });
-mut('R-M4 an uncaptured field silently treated as unchanged instead of named', function () {
-  var m = CENSUS.replace('    if (b[gk] === null || b[gk] === undefined) out.snapshot_gaps.push(gk);', '');
-  var r = (runCensus('RUN_R6R6_MANUAL_ROUTE_SAVE_READBACK_FROZEN', prodSheets(GOOD), null, m).res) || {};
-  // The mutant reports no gaps AND compares a null BEFORE against a real value, so it invents a change.
-  return JSON.stringify(r.snapshot_gaps || []) === '[]'
-    && JSON.stringify(OKR.snapshot_gaps) === '["status","generation_type","ownership"]';
+mut('R-M4 an equality field with no frozen value falling through to the weaker invariant', function () {
+  // A freeze that lost its status value must STOP. The mutant drops the completeness check, and the readback then
+  // certifies the row on 'the status is one of three ACTIVE values' alone — exactly the weaker guarantee
+  // this round replaced with an exact one.
+  var nulled = CENSUS.replace("  status: 'draft',", "  status: null,");
+  var m = nulled.replace("    if (snap[ek] === null || snap[ek] === undefined) issues.push('missing required field: ' + ek);", "");
+  var mutant = (runCensus('RUN_R6R6_MANUAL_ROUTE_SAVE_READBACK_FROZEN', prodSheets(GOOD), null, m).res) || {};
+  var shipped = (runCensus('RUN_R6R6_MANUAL_ROUTE_SAVE_READBACK_FROZEN', prodSheets(GOOD), null, nulled).res) || {};
+  return mutant.verdict === 'NARROW_MUTATION_CONFIRMED' && shipped.verdict === 'STOP';
 });
 
-// THE PREFLIGHT NOW EMITS A PASTE-READY FREEZE, so the three invariant gates can become equality gates without
-// anyone transcribing a snapshot by hand.
+// ---- R6-R6-R1 §7 \u2014 READINESS, RUN BEFORE THE CLICK ------------------------------------------------------
+// A freeze is only a BEFORE while production still agrees with it. Between the capture and the operator's
+// click another session could have saved, submitted or cancelled, and a readback run against a stale freeze
+// would compare the AFTER against a world that no longer existed.
+function readyRun(mut, censusSrc) {
+  return (runCensus('RUN_R6R6_MANUAL_ROUTE_SAVE_FROZEN_READINESS', prodSheets(mut), null, censusSrc).res) || {};
+}
+var RDY = readyRun({});                      // production exactly as frozen: nothing has happened yet
+eq(RDY.verdict, 'FROZEN_READBACK_READY', 'S1  the untouched plan is READY');
+eq(RDY.census, 'RUN_R6R6_MANUAL_ROUTE_SAVE_FROZEN_READINESS', 'S1a from the no-argument readiness entry point');
+eq([RDY.read_only, RDY.db_writes, RDY.writer_constructed, RDY.submit_calls, RDY.reservation_writes],
+  [true, 0, false, 0, 0], 'S1b read_only true, and four zeroes');
+eq(RDY.snapshot_gaps, [], 'S1c with no snapshot gap');
+eq(RDY.target_ids, { allocation_draft_id: 'SADH-K4-38523A90', allocation_draft_line_id: 'SADL-K2-92B8BAD2' },
+  'S1d the frozen target is present');
+eq([RDY.draft_version_live, RDY.last_mile_live], ['1', ''],
+  'S1e the version is still 1 and the last mile is still blank \u2014 nothing has been written');
+eq([RDY.route_a_drift, RDY.route_b_drift, RDY.missing_other_rows], [[], [], []],
+  'S1f no route has drifted from the freeze');
+eq([RDY.header_count_frozen, RDY.header_count_live, RDY.line_count_frozen, RDY.line_count_live], [2, 2, 2, 2],
+  'S1g and the plan shape matches');
+
+function refuses(label, mut, fragment, censusSrc) {
+  var r = readyRun(mut, censusSrc);
+  ok(r.verdict === 'STOP' && (!fragment || new RegExp(fragment, 'i').test(r.stop_reason || '')),
+    label + ' \u2014 ' + (r.verdict === 'STOP' ? String(r.stop_reason).slice(0, 88) : 'DID NOT STOP'));
+  return r;
+}
+// A SNAPSHOT GAP. Any equality field without a frozen value refuses, rather than falling through to the
+// weaker invariant and certifying something it cannot support.
+['status', 'generation_type', 'ownership'].forEach(function (k) {
+  var m = CENSUS.replace(new RegExp('  ' + k + ": '[^']*',"), '  ' + k + ': null,');
+  var r = refuses('S2  a snapshot gap on ' + k, {}, 'missing required field: ' + k, m);
+  ok((r.snapshot_gaps || []).indexOf(k) !== -1, 'S2a and ' + k + ' is named in snapshot_gaps');
+});
+// ROUTE A DRIFT, on a field the freeze pins exactly.
+refuses('S3  Route A status drifted', { aHeader: { status: 'site_confirmed' } }, 'Route A has drifted.*status');
+refuses('S3a Route A method drifted', { aHeader: { recommended_shipping_method: 'air' } },
+  'Route A has drifted');
+refuses('S3b Route A quantity drifted', { aLine: { planned_qty: 321 } }, 'Route A has drifted|drifted');
+refuses('S3c Route A became AI-owned', { aHeader: { generation_run_id: 'RUN-1' } },
+  'Route A has drifted.*(ownership|generation_type)');
+// ROUTE B DRIFT, on the fields its frozen record carries.
+refuses('S4  Route B quantity drifted', { bLine: { planned_qty: 199 } }, 'companion route has drifted');
+refuses('S4a Route B destination kind drifted',
+  { bLine: { destination_kind: 'MARKETPLACE', destination_marketplace: 'Amazon', destination_warehouse_id: '' },
+    bHeader: { recommended_destination_warehouse_id: '', destination_marketplace: 'Amazon' } },
+  'companion route has drifted|companion route is gone');
+refuses('S4b Route B is gone altogether', { bLine: { allocation_draft_line_id: 'SADL-VANISHED' } },
+  'companion route is gone');
+// TARGET, VERSION AND COUNT DRIFT.
+refuses('S5  the target line id changed', { aLine: { allocation_draft_line_id: 'SADL-OTHER' } },
+  'frozen target row is not present');
+refuses('S5a the version already moved', { aHeader: { draft_version: 2 } }, 'draft_version in production is 2');
+refuses('S5b the last mile is already set', { aHeader: { recommended_last_mile_delivery: 'TRUCK' } },
+  'already set');
+refuses('S5c a header was added since the freeze',
+  { extraHeaders: [{ allocation_draft_id: 'SADH-EXTRA', company: 'ResUS', country: 'US', marketplace: 'Amazon',
+      status: 'draft', destination_marketplace: 'Amazon', recommended_source_warehouse_id: 'WH-TW-CN-FACTORY-YOUXIN',
+      recommended_shipping_method: 'air', recommended_last_mile_delivery: 'PARCEL' }],
+    extraLines: [{ allocation_draft_line_id: 'SADL-EXTRA', allocation_draft_id: 'SADH-EXTRA', sku: SKU,
+      planned_qty: 5, line_status: 'draft', destination_kind: 'MARKETPLACE', destination_marketplace: 'Amazon' }] },
+  'plan shape has changed');
+// AND THE ORDER MATTERS: readiness refuses the state the readback would CONFIRM, because nothing has happened
+// yet. The two are not the same check with a different name.
+eq(readyRun(GOOD).verdict, 'STOP',
+  'S6  a plan where the change HAS landed is not READY \u2014 readiness runs before the click');
+eq(OKR.verdict, 'NARROW_MUTATION_CONFIRMED', 'S6a which is exactly the state the readback confirms');
+eq(frozenRun({}).verdict, 'STOP', 'S6b and the untouched plan the readiness accepts is not a confirmed write');
+
+mut('S-M1 readiness ignoring a snapshot gap', function () {
+  var m = CENSUS.replace("  status: 'draft',", '  status: null,')
+    .replace('  if (out.snapshot_issues.length || out.snapshot_gaps.length) {', '  if (false) {');
+  return readyRun({}, m).verdict === 'FROZEN_READBACK_READY'
+    && readyRun({}, CENSUS.replace("  status: 'draft',", '  status: null,')).verdict === 'STOP';
+});
+mut('S-M2 readiness not comparing the companion routes at all', function () {
+  var m = CENSUS.replace('  var others = snap.other_rows || [];', '  var others = [];');
+  return readyRun({ bLine: { planned_qty: 199 } }, m).verdict === 'FROZEN_READBACK_READY'
+    && readyRun({ bLine: { planned_qty: 199 } }).verdict === 'STOP';
+});
+mut('S-M3 readiness accepting a version that already moved', function () {
+  var m = CENSUS.replace(
+    '  if (CENSUS_str_(a.draft_version) !== CENSUS_str_(snap.expected_draft_version)) {', '  if (false) {');
+  return readyRun({ aHeader: { draft_version: 2 } }, m).verdict === 'FROZEN_READBACK_READY'
+    && readyRun({ aHeader: { draft_version: 2 } }).verdict === 'STOP';
+});
+
+// THE PREFLIGHT NOW EMITS A PASTE-READY FREEZE, so a LATER capture needs no hand-transcription.
 ok(typeof P0.frozen_snapshot_source === 'string' && /var R6R6_FROZEN_BEFORE_ = \{/.test(P0.frozen_snapshot_source),
   'R9  the preflight emits the frozen constant as paste-ready source');
 ok(/"status":/.test(P0.frozen_snapshot_source) && /"ownership":/.test(P0.frozen_snapshot_source),
-  'R9a including the three fields the current freeze could not capture');
+  'R9a carrying every field, so a RE-freeze after a plan change needs no hand-transcription');
+// It is a convenience for a LATER capture, never a step in the authorized run: the constant already holds the
+// production BEFORE, so the operator edits no code between preflight and Save.
+eq(OKR.snapshot_gaps, [], 'R9c and the shipped freeze needs no upgrade before the authorized run');
 ok(/"allocation_draft_id": "SADH-K4-38523A90"/.test(P0.frozen_snapshot_source),
   'R9b and it is THIS run\'s target, not a template');
 
@@ -825,13 +933,53 @@ eq(noRouteSource.model('CO1100-R').supply_sources_comparable, null,
   'R10b and with the ROUTE side unresolved it is NULL too');
 ok(!/Different inventory sources/.test(noRouteSource.html('CO1100-R')),
   'R10c so no claim is made from one side alone');
-ok(/data-supply-comparable="null"/.test(oneSideUnknown.html('CO1100-R')),
-  'R11 and UNKNOWN is published as its own value, distinct from false');
-ok(/data-supply-comparable="false"/.test(HD) && /data-supply-comparable="true"/.test(same.html('CO1100-R')),
-  'R11a with false and true published for the two known cases');
-var visR = HD.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
-ok(visR.length <= 80 && !/\./.test(visR),
-  'R12 and the safety fact is still carried without a paragraph returning (' + visR.length + ' chars)');
+// ---- R6-R6-R1 \u2014 THE DOM CONTRACT, MEASURED AND PINNED --------------------------------------------------
+// The dataset key SET is pinned as a whole, not one key at a time: a round that removes `supplyComparable`
+// while adding something else would pass every individual check and still lose the fact that matters.
+function reconDataset(html) {
+  var root = /<div class="ir-plan-recon"[^>]*>/.exec(html)[0], ds = {}, re = /data-([a-z-]+)="([^"]*)"/g, m;
+  while ((m = re.exec(root)) !== null) {
+    ds[m[1].replace(/-([a-z])/g, function (_, ch) { return ch.toUpperCase(); })] = m[2];
+  }
+  return ds;
+}
+var DS_KEYS = ['recommendationSource', 'recommendationState', 'plannedState', 'differenceKind',
+  'supplyComparable', 'routeCount', 'planChangedByThisRun'];
+eq(Object.keys(reconDataset(HD)), DS_KEYS, 'R11  the element publishes exactly these seven dataset keys');
+eq(Object.keys(reconDataset(same.html('CO1100-R'))), DS_KEYS, 'R11a the same seven when the sources agree');
+eq(Object.keys(reconDataset(oneSideUnknown.html('CO1100-R'))), DS_KEYS,
+  'R11b and the same seven when one side is unknown \u2014 the key never disappears with the warning');
+// THE THREE STATES, by their real values.
+eq(reconDataset(HD).supplyComparable, 'false', 'R11c different sources publish "false"');
+eq(reconDataset(same.html('CO1100-R')).supplyComparable, 'true', 'R11d the same source publishes "true"');
+eq(reconDataset(oneSideUnknown.html('CO1100-R')).supplyComparable, 'null',
+  'R11e and an unknown side publishes "null" \u2014 its own value, never collapsed into false');
+eq(reconDataset(noRouteSource.html('CO1100-R')).supplyComparable, 'null',
+  'R11f from either side, so neither can imply a difference alone');
+// The rest of the dataset, measured on the live-shaped case.
+eq(reconDataset(HD), { recommendationSource: 'MATERIALIZED_SUGGESTED_QTY', recommendationState: 'READY',
+  plannedState: 'READY', differenceKind: 'REMAINING', supplyComparable: 'false', routeCount: '2',
+  planChangedByThisRun: 'false' }, 'R11g the whole dataset, pinned by value');
+// aria-label and title exist ONLY in the different-and-known state, and carry the same text.
+var ariaHD = /aria-label="([^"]*)"/.exec(HD), titleHD = /title="([^"]*)"/.exec(HD);
+eq(titleHD[1], 'Recommendation: WH-RESUS-US-3PL-AMZLGS\nCurrent plan: CN Youxin (CN)',
+  'R11h the title names each side\'s own stock, and nothing else');
+eq(ariaHD[1], 'Different inventory sources. ' + titleHD[1],
+  'R11i and the accessible description is the warning plus that same detail');
+[same.html('CO1100-R'), oneSideUnknown.html('CO1100-R'), noRouteSource.html('CO1100-R')].forEach(function (h, i) {
+  ok(!/aria-label=/.test(h) && !/title="/.test(h),
+    'R11j[' + i + '] no aria-label and no title when there is no difference to describe');
+});
+// The visible text, by value, in all three states. Nothing is added unless BOTH sources are known AND differ.
+function visibleOf(h) { return h.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim(); }
+eq(visibleOf(HD), 'Recommended 920 Planned 520 Remaining 400 Different inventory sources',
+  'R12  different-and-known is the ONLY state that adds visible words');
+eq(visibleOf(same.html('CO1100-R')), 'Recommended 920 Planned 520 Remaining 400',
+  'R12a the same source adds none');
+eq(visibleOf(oneSideUnknown.html('CO1100-R')), 'Recommended 920 Planned 520 Remaining 400',
+  'R12b and an unknown side adds none \u2014 unknown is not different');
+ok(visibleOf(HD).length === 69 && !/\./.test(visibleOf(HD)),
+  'R12c the widest state is 69 characters and still contains no sentence');
 
 // ================================================================================================================
 section('§6 — what the browser actually does when the Last Mile changes');
