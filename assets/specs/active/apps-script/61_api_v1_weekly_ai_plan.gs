@@ -143,6 +143,19 @@ function handleGenerateWeeklyAiPlanDraft_(body) {
     // itself names the first blocking issue instead of restating the generic code.
     if (!mapped.ready) {
       // F1-7N-FC-1B-E3-R4 §G — before this is reported as a failure, ask whether it IS one.
+      // R6-R7-R1 §C — ASK THE CANONICAL ROW FIRST. The verdict below opens with
+      // `if (!receivers.length) return NO_RECEIVERS_BUILT`, and a scope that needs nothing builds no
+      // receivers — so the one situation that most obviously means 'nothing to do' was the one it could
+      // not recognise. The authority resolved in the harvest answers it directly.
+      var _na0 = weeklyAiPlanK2NoAction_(h);
+      if (_na0.noAction) {
+        return jsonResponse_(weeklyAiPlanNoActionResponse_(_na0, {
+          planning_cycle: planningCycle,
+          scope: { company: company, country: country, marketplace: weeklyAiPlanStr_(body.currentMarketplace) },
+          mode: mode, site_count: h.site_count == null ? null : h.site_count,
+          source_data_as_of: weeklyAiPlanStr_(h.sourceDataAsOf) || null,
+          recommendation_authority: h.recommendationState || null }));
+      }
       var _nd = weeklyAiPlanNoDemandVerdict_(h, mapped);
       if (_nd.noDemand) {
         return jsonResponse_({
@@ -214,7 +227,11 @@ function handleGenerateWeeklyAiPlanDraft_(body) {
 // build stamp: it was the one file in this chain whose sync state the deployment manifest could not report, so
 // "the deployment answers HARVEST_NOT_READY with no issues" and "the deployment predates the fix" were the same
 // observation. Stamped and registered in 63_'s manifest.
-var WAP_BUILD_VERSION_ = 'F1-7N-FC-1B-E3-R4-A2-R1-R6';
+// R6-R7-R1 — moved because THIS FILE changed: a valid zero recommendation is now a typed success
+// (AI_PLAN_NO_ACTION, zero writes) instead of a REQUESTED_SCOPE_EMPTY refusal, and the canonical demand is
+// netted by the qualifying MANUAL plan before the allocator sizes anything. A stamp records the round a
+// module last changed; it is not the release.
+var WAP_BUILD_VERSION_ = 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R7-R1';
 
 // F1-7N-FA-3C-R6F2 — K2 route-group generation (reached ONLY when INVENTORY_AI_PLAN_DB_GENERATION_ENABLED_ = true).
 // per-source lines (KMWRB.buildWeeklySourceLines) → route derivation + K2 partition (KMWRR, per marketplace) →
@@ -1125,6 +1142,19 @@ function weeklyAiPlanResolveGapRunLineage_(planningCycle, harvest, request) {
   };
 }
 
+/**
+ * R6-R7-R1 §C — the no-action decision as the K2 path sees it. The harvest resolved it; this reads it back
+ * rather than recomputing, so the generation and any diagnostic asking the same question get the same answer
+ * from the same evaluation. A harvest that predates this round (a half-synced project) carries none, and that
+ * is reported as its own reason rather than defaulted to either verdict.
+ */
+function weeklyAiPlanK2NoAction_(harvest) {
+  var d = harvest && harvest.noActionDecision;
+  if (!d) return { noAction: false, reason: 'NO_ACTION_AUTHORITY_UNAVAILABLE', recommendation_state: null,
+    recommended_qty: null, qualifying_planned_qty: null, residual_qty: null, per_scope: [] };
+  return d;
+}
+
 function weeklyAiPlanGenerateK2_(ss, request, harvest, deps, body, controlledAuth) {
   var src = KMWRB.buildWeeklySourceLines(request);
   if (!src.ok) return jsonResponse_({ success: false, errors: [weeklyAiPlanErr_(src.status || 'BLOCKED_INPUT', src.reason || 'source lines blocked')] });
@@ -1140,9 +1170,48 @@ function weeklyAiPlanGenerateK2_(ss, request, harvest, deps, body, controlledAut
   // scope or the run fails closed (no out-of-scope rows). An aggregated company/country run (no marketplace) keeps the
   // legacy fan-out but is NOT the controlled-run path.
   var requestedMkt = String(scope0.marketplace != null ? scope0.marketplace : '').trim();
+  // R6-R7-R1 §C — an aggregated run whose whole universe allocated nothing asks the same question. It is
+  // the identical situation without a marketplace to name, and answering it differently would make the
+  // correctness of the answer depend on how the request was addressed.
+  if (!allocated.length) {
+    var _naAll = weeklyAiPlanK2NoAction_(harvest);
+    if (_naAll.noAction) {
+      return jsonResponse_(weeklyAiPlanNoActionResponse_(_naAll, {
+        planning_cycle: request.planningCycle, scope: scope0, mode: request.mode || null,
+        site_count: harvest.site_count == null ? null : harvest.site_count,
+        source_data_as_of: weeklyAiPlanStr_(harvest.sourceDataAsOf) || null,
+        recommendation_authority: harvest.recommendationState || null }));
+    }
+  }
   if (requestedMkt) {
     if (/^all(_sites)?$/i.test(requestedMkt)) return jsonResponse_({ success: false, errors: [weeklyAiPlanErr_('SCOPE_ALL_SITES_FORBIDDEN', 'a controlled run must target exactly one marketplace, never ALL_SITES')] });
-    if (!byMkt[requestedMkt]) return jsonResponse_({ success: false, errors: [weeklyAiPlanErr_('REQUESTED_SCOPE_EMPTY', 'requested marketplace produced no allocated lines: ' + requestedMkt)] });
+    if (!byMkt[requestedMkt]) {
+      // R6-R7-R1 §C — BEFORE THIS IS REPORTED AS A FAILURE, ASK WHETHER IT IS ONE.
+      //
+      // 'produced no allocated lines' was the same sentence for 'this SKU needs nothing today' and 'you
+      // asked for a scope that is not there'. The first is a correct finish and the second is a fault, and
+      // an operator told the second about the first has no way to discover the truth. The canonical row
+      // decides, because it is the only thing that can: a READY row with a finite number in every window
+      // is a STATEMENT, and an absent, BLOCKED, duplicated or half-written one is not.
+      var _na = weeklyAiPlanK2NoAction_(harvest);
+      if (_na.noAction) {
+        return jsonResponse_(weeklyAiPlanNoActionResponse_(_na, {
+          planning_cycle: request.planningCycle, scope: scope0, mode: request.mode || null,
+          site_count: harvest.site_count == null ? null : harvest.site_count,
+          source_data_as_of: weeklyAiPlanStr_(harvest.sourceDataAsOf) || null,
+          recommendation_authority: harvest.recommendationState || null }));
+      }
+      // Still a refusal — and it now says WHY it could not be read as a zero, so the two are never
+      // confused again by anyone reading this response.
+      return jsonResponse_({ success: false, zero_write: true,
+        errors: [weeklyAiPlanErr_('REQUESTED_SCOPE_EMPTY',
+          'requested marketplace produced no allocated lines: ' + requestedMkt
+            + ' (and the canonical recommendation could not be read as a valid zero: ' + _na.reason + ')',
+          { recommendation_state: _na.recommendation_state, no_action_reason: _na.reason,
+            missing_reasons: _na.missing_reasons || [], recommended_qty: _na.recommended_qty,
+            qualifying_planned_qty: _na.qualifying_planned_qty, residual_qty: _na.residual_qty,
+            recommendation_authority: harvest.recommendationState || null, db_writes: 0 })] });
+    }
     var only = {}; only[requestedMkt] = byMkt[requestedMkt]; byMkt = only;   // fail-closed: never generate outside the frozen marketplace
   }
   // F1-7N-FA-3C-R6F2F1 — IMMEDIATE BACKEND GATE. Generation proceeds ONLY when the GLOBAL flag is true (normal
@@ -1747,6 +1816,16 @@ function weeklyAiPlanHarvest_(ss, scope, expectedBySite) {
   // §3 — and then ONE fact per canonical demand, before any of it is grouped or weighted.
   var coll = weeklyAiPlanCollapseCanonicalDemand_(iso.sites, scope, errors);
   sites = coll.sites;
+  // R6-R7-R1 §B/§D/§E — THE RECOMMENDATION AUTHORITY AND THE RESIDUAL, RESOLVED HERE AND ONLY HERE.
+  //
+  // The state is asked of the canonical rows for the AUTHORIZED scopes, so a later stage never has to
+  // reconstruct 'was that a zero or a nothing?' from the shape of an empty array. The netting then removes
+  // demand an operator has already planned, BEFORE the allocator sizes anything — which is the only point
+  // at which 'generate the residual' can mean what it says.
+  var _recState = weeklyAiPlanRecommendationState_(canonical, target);
+  var _planned = weeklyAiPlanQualifyingPlannedQty_(ss, scope);
+  var _residual = weeklyAiPlanNetSitesByResidual_(sites, _planned.byKey, scope);
+  var _noAction = weeklyAiPlanNoActionDecision_(_recState, _planned);
   var isolation = {
     enforced: true, stage: 'PRE_CANONICAL_GROUPING',
     target_scopes: target.scopes, requested_marketplace: target.requested_marketplace,
@@ -1777,7 +1856,9 @@ function weeklyAiPlanHarvest_(ss, scope, expectedBySite) {
   // SUCCESS returns used to discard it. When every site was dropped, the consequence was exact and total: zero
   // receivers → KMAF ready:false with issues:[] → mapper ready:false with issues:[] → a bare
   // HARVEST_NOT_READY. The reason was known at THIS line and thrown away three lines later.
+  // R6-R7-R1 — the zero-site return is the one that used to lose the answer. It carries the authority now.
   if (!sites.length) return { ok: true, errors: errors, site_count: 0, kmaf: { ready: true, receiverFacts: [], planningFacts: [] }, horizonsByDemandRef: {}, poolsBySku: weeklyAiPlanPoolsBySku_(poolFacts, scope), warehousesById: warehousesById,
+    recommendationState: _recState, qualifyingPlanned: _planned, residual: _residual, noActionDecision: _noAction,
     sourceDataAsOf: asOf.date, sourceDataAsOfAuthority: { run_id: asOf.run_id, date: asOf.date, source: 'GAP_INV_RUN_LINEAGE' },
     gapLineage: asOf.lineage, isolation: isolation, snapshot_freshness: canonical.freshness || null,
     accepted_snapshot_date: canonical.acceptedDate || null, gap_schedule: canonical.schedule || null,
@@ -1825,6 +1906,9 @@ function weeklyAiPlanHarvest_(ss, scope, expectedBySite) {
     // §1 — the normalization audit, so a report can state how many months were real, how many were an
     // explicit zero, and how many were defaulted — without re-deriving any of it.
     forecast_normalization: built.forecastNormalization || null,
+    // R6-R7-R1 — the recommendation state, the qualifying plan and the residual, carried out rather than
+    // re-derived. One authority, so a census and a live generation can never disagree about the number.
+    recommendationState: _recState, qualifyingPlanned: _planned, residual: _residual, noActionDecision: _noAction,
     // §3 — which run was adopted and why, so the report never has to infer it.
     snapshot_freshness: canonical.freshness || null,
     accepted_snapshot_date: canonical.acceptedDate || null,
@@ -2056,6 +2140,394 @@ function weeklyAiPlanCollapseCanonicalDemand_(sites, scope, errors) {
   }
   return { sites: out, collapsed_site_count: collapsed, conflict_count: conflicts.length,
     conflicts: conflicts.slice(0, 10), canonical_demand_count: out.length };
+}
+
+// ================================================================================================================
+// F1-7N-FC-1B-E3-R4-A2-R1-R6-R7-R1 §B/§C/§D/§E — A VALID ZERO IS AN ANSWER, NOT A MISSING SCOPE.
+//
+// THE CONTRADICTION THIS CLOSES. The materialized row for ResUS/US/Amazon/CO1100-R is READY and every window
+// holds a stored, finite 0: the SKU needs nothing. The generation path read that as follows —
+//
+//     zero canonical demand  ->  the recommendation workspace enumerates no shortage line
+//                            ->  weeklyAiPlanEnumerateSites_ returns []
+//                            ->  the harvest returns ok with site_count 0
+//                            ->  KMWRB produces 0 source lines, the K2 allocator 0 allocated lines
+//                            ->  byMkt['Amazon'] is undefined
+//                            ->  REQUESTED_SCOPE_EMPTY, success:false
+//
+// — and REQUESTED_SCOPE_EMPTY means "the requested marketplace produced no allocated lines", which is the
+// SAME sentence for "this SKU needs nothing today" and for "you asked for a scope that is not there". Those
+// are opposite operational situations: one is a correct finish, the other is a fault to investigate. The
+// existing no-demand verdict could not tell them apart either, because its very first gate is
+// `if (!receivers.length) return NO_RECEIVERS_BUILT` — and a zero-need scope builds no receivers.
+//
+// WHAT DECIDES IT is the only thing that can: the canonical row itself, which the harvest has already read.
+// A row that is READY at the accepted snapshot date with a finite number in every required window is a
+// STATEMENT, and the statement is "zero". A row that is absent, BLOCKED, duplicated, from another run, or
+// holding a blank where a number belongs is not a statement at all, and nothing may be concluded from it.
+//
+// MISSING IS NEVER ZERO. Every reader below returns null for an absent value and never coerces one, because
+// the whole defect class this round closes is a blank being read as a quantity.
+// ================================================================================================================
+var WAP_RECOMMENDATION_STATES_ = {
+  VALID_ZERO: 'VALID_ZERO_RECOMMENDATION',
+  NONZERO: 'NONZERO_RECOMMENDATION',
+  MISSING: 'MISSING_RECOMMENDATION'
+};
+// The formal outcome name for "the correct amount to generate is nothing". It travels BESIDE the existing
+// NO_REPLENISHMENT_REQUIRED / zero_result / NO_DEMAND keys rather than replacing them: the shipped page
+// classifies a zero result from those three, and a success shape it cannot recognise is reported to the
+// operator as a generic failure — which is the exact outcome this round exists to stop producing.
+var WAP_NO_ACTION_CODE_ = 'AI_PLAN_NO_ACTION';
+
+/** MISSING vs ZERO, once, for every numeric read below. '' / null / undefined / non-finite → null. */
+function weeklyAiPlanQty_(v) {
+  if (v === '' || v === null || v === undefined) return null;
+  var n = Number(v);
+  return isFinite(n) ? n : null;
+}
+
+/**
+ * §B/§D — THE ONE RECOMMENDATION AUTHORITY, asked about an EXACT scope.
+ *
+ * `canonical` is what weeklyAiPlanCanonicalDemand_ already produced: rows keyed by
+ * company|country|marketplace|sku, narrowed to the ACCEPTED snapshot date by the freshness authority, so
+ * "current run" is established before this function is called rather than re-litigated inside it.
+ *
+ * `target` is weeklyAiPlanTargetScopes_'s answer — the allowlisted scopes this run may write. Asking about
+ * anything else would be asking about a scope the run cannot act on.
+ *
+ * The per-scope quantity is the FURTHEST configured window, which is the same rule the page's standing
+ * authority uses (_irSuggestedQtyState_ → d90_suggested_qty). The windows are CUMULATIVE checkpoints, so the
+ * furthest one is the single actionable total and summing them would double-count need.
+ */
+function weeklyAiPlanRecommendationState_(canonical, target) {
+  var order = ['D18', 'D30', 'D45', 'D90'];
+  var windows = [];
+  order.forEach(function (w) { if (Object.prototype.hasOwnProperty.call(WAP_GAP_WINDOW_COL_, w)) windows.push(w); });
+  for (var extra in WAP_GAP_WINDOW_COL_) {
+    if (Object.prototype.hasOwnProperty.call(WAP_GAP_WINDOW_COL_, extra) && windows.indexOf(extra) === -1) windows.push(extra);
+  }
+  var furthest = windows.length ? windows[windows.length - 1] : null;
+  var out = {
+    state: WAP_RECOMMENDATION_STATES_.MISSING,
+    authority_rule: 'inventory_replenishment_gap, the row at the ACCEPTED snapshot date for the exact'
+      + ' (company, country, marketplace, sku). The quantity is the FURTHEST cumulative window ('
+      + (furthest || 'none configured') + '), which is the single actionable total; the windows are'
+      + ' cumulative checkpoints and summing them would double-count need.',
+    windows_required: windows.slice(),
+    furthest_window: furthest,
+    accepted_calculation_date: (canonical && canonical.acceptedDate) || null,
+    snapshot_freshness_state: (canonical && canonical.freshnessState) || null,
+    current_run: null,
+    per_scope: [],
+    recommended_qty_total: null,
+    evaluated_scope_count: 0,
+    missing_reasons: []
+  };
+  if (!canonical || canonical.ok !== true) {
+    out.missing_reasons.push({ reason: 'CANONICAL_DEMAND_UNAVAILABLE', detail: (canonical && canonical.reason) || null });
+    return out;
+  }
+  out.current_run = {
+    calculation_date: canonical.acceptedDate || null,
+    freshness_state: canonical.freshnessState || null,
+    gap_job: canonical.jobState || null,
+    distinct_dates: canonical.distinctDates || []
+  };
+  var scopes = (target && target.scopes) || [];
+  if (!scopes.length) {
+    out.missing_reasons.push({ reason: 'NO_AUTHORIZED_SCOPE', detail: (target && target.reason) || null });
+    return out;
+  }
+  var total = 0, anyMissing = false, anyPositive = false;
+  scopes.forEach(function (s) {
+    var key = s.company + '|' + s.country + '|' + s.marketplace + '|' + s.sku;
+    var row = canonical.bySite ? canonical.bySite[key] : null;
+    var entry = { company: s.company, country: s.country, marketplace: s.marketplace, sku: s.sku,
+      key: key, evaluated: false, reason: null, calculation_status: null, calculation_date: null,
+      calculated_at: null, windows: {}, recommended_qty: null };
+    if (!row) {
+      entry.reason = 'NO_ROW_AT_THE_ACCEPTED_DATE';
+      anyMissing = true; out.per_scope.push(entry); out.missing_reasons.push({ key: key, reason: entry.reason });
+      return;
+    }
+    entry.calculation_status = row.calculation_status || null;
+    entry.calculation_date = row.calculation_date || null;
+    entry.calculated_at = row.calculated_at || null;
+    if (row.duplicate === true) {
+      entry.reason = 'DUPLICATE_ROW_FOR_THIS_KEY';
+      anyMissing = true; out.per_scope.push(entry); out.missing_reasons.push({ key: key, reason: entry.reason });
+      return;
+    }
+    if (weeklyAiPlanStr_(row.calculation_status) !== 'READY') {
+      // BLOCKED and ERROR leave the quantities blank by contract (43_). A non-READY row carries no number,
+      // and reading its blanks as zero is the defect the materializer refuses to commit.
+      entry.reason = 'NOT_READY:' + (weeklyAiPlanStr_(row.calculation_status) || '(blank)');
+      anyMissing = true; out.per_scope.push(entry); out.missing_reasons.push({ key: key, reason: entry.reason });
+      return;
+    }
+    var blank = null;
+    windows.forEach(function (w) {
+      var v = weeklyAiPlanQty_(row.suggestedByWindow ? row.suggestedByWindow[w] : null);
+      entry.windows[w] = v;
+      if (v === null && blank === null) blank = w;
+    });
+    if (blank !== null) {
+      entry.reason = 'WINDOW_VALUE_MISSING:' + blank;
+      anyMissing = true; out.per_scope.push(entry); out.missing_reasons.push({ key: key, reason: entry.reason });
+      return;
+    }
+    entry.evaluated = true;
+    entry.recommended_qty = furthest ? entry.windows[furthest] : null;
+    if (entry.recommended_qty === null) {
+      entry.evaluated = false;
+      entry.reason = 'NO_CONFIGURED_WINDOW';
+      anyMissing = true; out.per_scope.push(entry); out.missing_reasons.push({ key: key, reason: entry.reason });
+      return;
+    }
+    // A positive value in ANY window is a need, even when the furthest one has closed: the earlier shortage
+    // is real and is what the allocator plans against. The furthest window remains the reported total.
+    windows.forEach(function (w) { if (entry.windows[w] > 0) anyPositive = true; });
+    total += entry.recommended_qty;
+    out.evaluated_scope_count++;
+    out.per_scope.push(entry);
+  });
+  if (anyMissing) { out.state = WAP_RECOMMENDATION_STATES_.MISSING; return out; }
+  out.recommended_qty_total = total;
+  out.state = anyPositive ? WAP_RECOMMENDATION_STATES_.NONZERO : WAP_RECOMMENDATION_STATES_.VALID_ZERO;
+  return out;
+}
+
+/**
+ * §E — THE QUALIFYING ACTIVE PLAN, counted per exact (company, country, marketplace, sku).
+ *
+ * "Qualifying" is deliberately narrow. A header qualifies only when all four scope axes match EXACTLY, its
+ * status is not terminal, AND IT IS NOT AN AI DRAFT; a line qualifies only when its sku matches and its own
+ * line status is not terminal. A row for another marketplace, another SKU, another company or a
+ * submitted/cancelled/expired plan is not part of what is already planned here, and counting one would make
+ * the residual too small — which is the error that silently under-generates.
+ *
+ * THE AI EXCLUSION IS NOT A DETAIL. A generation supersedes its own previous drafts through the lifecycle, so
+ * a row on its way to `expired` is not a commitment anybody is holding. Counting one would net a run against
+ * its own last output and make regeneration impossible for ever — which is what happened, and what the R4
+ * carrier-authority suite caught. It is also what the contract is FOR: an OPERATOR's decision outranks a
+ * recommendation, and an earlier recommendation does not.
+ *
+ * The terminal sets are READ from 16_ and the provenance from 69_'s own classifier, rather than restated, so
+ * "which statuses still count" and "is this row AI's?" each keep the one answer they already have.
+ */
+/** Provenance, through 69_'s classifier when it is loaded. The fallback is the SAME two rules, and it is
+ *  named in `provenance_authority` so a project missing 69_ is a stated fact rather than a silent one. */
+function weeklyAiPlanIsAiRow_(row) {
+  if (typeof aiplIsAiGenerated_ === 'function') return aiplIsAiGenerated_(row);
+  var gt = weeklyAiPlanStr_(row && row.generation_type).toLowerCase();
+  if (gt === 'user_created') return false;
+  if (gt === 'system_generated' || gt === 'scheduled' || gt === 'manual_refresh') return true;
+  return !!weeklyAiPlanStr_(row && row.generation_run_id);
+}
+
+function weeklyAiPlanQualifyingPlannedQty_(ss, scope) {
+  var termH = (typeof SAD_TERMINAL_STATUSES_ !== 'undefined') ? SAD_TERMINAL_STATUSES_ : { submitted: 1, cancelled: 1, expired: 1 };
+  var termL = (typeof SAD_TERMINAL_LINE_STATUSES_ !== 'undefined') ? SAD_TERMINAL_LINE_STATUSES_
+    : { submitted: 1, cancelled: 1, expired: 1, superseded: 1, superseded_user_review: 1 };
+  var out = { ok: false, reason: null, byKey: {}, rows: [], header_count: 0, line_count: 0,
+    excluded: { terminal_header: 0, terminal_line: 0, scope_mismatch: 0, no_header: 0, blank_qty: 0,
+      ai_generated_header: 0 },
+    authority: 'header company/country/marketplace + line sku, all EXACT; non-terminal header status;'
+      + ' non-terminal line status; and MANUAL provenance only (16_ SAD_TERMINAL_STATUSES_ /'
+      + ' SAD_TERMINAL_LINE_STATUSES_, 69_ aiplIsAiGenerated_). An AI draft this run would supersede is not'
+      + ' an existing commitment and is never counted as one.',
+    provenance_authority: (typeof aiplIsAiGenerated_ === 'function') ? 'aiplIsAiGenerated_ (69_)' : 'FALLBACK' };
+  if (typeof gapReadObjects_ !== 'function') { out.reason = 'SHEET_READER_UNAVAILABLE'; return out; }
+  var headers, lines;
+  try {
+    headers = gapReadObjects_(ss, 'shipping_allocation_drafts') || [];
+    lines = gapReadObjects_(ss, 'shipping_allocation_draft_lines') || [];
+  } catch (e) { out.reason = 'ALLOCATION_DRAFT_READ_FAILED'; return out; }
+  var byId = {};
+  headers.forEach(function (h) {
+    var st = weeklyAiPlanStr_(h.status).toLowerCase();
+    if (termH[st]) { out.excluded.terminal_header++; return; }
+    if (weeklyAiPlanStr_(h.company) !== weeklyAiPlanStr_(scope.company)
+      || weeklyAiPlanStr_(h.country) !== weeklyAiPlanStr_(scope.country)) { out.excluded.scope_mismatch++; return; }
+    if (weeklyAiPlanIsAiRow_(h)) { out.excluded.ai_generated_header++; return; }
+    byId[weeklyAiPlanStr_(h.allocation_draft_id)] = h;
+    out.header_count++;
+  });
+  lines.forEach(function (l) {
+    var h = byId[weeklyAiPlanStr_(l.allocation_draft_id)];
+    if (!h) { out.excluded.no_header++; return; }
+    var ls = weeklyAiPlanStr_(l.line_status).toLowerCase();
+    if (termL[ls]) { out.excluded.terminal_line++; return; }
+    var q = weeklyAiPlanQty_(l.planned_qty);
+    if (q === null) { out.excluded.blank_qty++; return; }
+    var key = weeklyAiPlanStr_(h.company) + '|' + weeklyAiPlanStr_(h.country) + '|'
+      + weeklyAiPlanStr_(h.marketplace) + '|' + weeklyAiPlanStr_(l.sku);
+    out.byKey[key] = (out.byKey[key] || 0) + q;
+    out.line_count++;
+    if (out.rows.length < 50) {
+      out.rows.push({ key: key, allocation_draft_id: weeklyAiPlanStr_(h.allocation_draft_id),
+        allocation_draft_line_id: weeklyAiPlanStr_(l.allocation_draft_line_id),
+        status: weeklyAiPlanStr_(h.status), line_status: weeklyAiPlanStr_(l.line_status), planned_qty: q });
+    }
+  });
+  out.ok = true;
+  return out;
+}
+
+/**
+ * §E — THE RESIDUAL. residual = max(recommended - qualifying planned, 0).
+ *
+ * The clamp at zero is the whole rule for the over-planned case: a plan larger than the recommendation is
+ * EXCESS, and an AI generation NEVER reduces, cancels or reclaims an operator's route to bring the total back
+ * down. It simply has nothing left to add.
+ *
+ * A NULL recommendation stays null. Treating an unknown as zero would report NO_ACTION for a scope nobody
+ * could read, which is exactly the conflation §B exists to remove.
+ */
+function weeklyAiPlanResidualQty_(recommendedQty, plannedQty) {
+  var r = weeklyAiPlanQty_(recommendedQty);
+  if (r === null) return null;
+  var p = weeklyAiPlanQty_(plannedQty);
+  if (p === null) p = 0;
+  var d = r - p;
+  return d > 0 ? d : 0;
+}
+
+/**
+ * §E — NET THE CANONICAL DEMAND BY WHAT IS ALREADY PLANNED, before anything is grouped, weighted or routed.
+ *
+ * This is the only place the residual can be applied and still mean what it says. Applying it later would let
+ * the allocator size routes against demand that is already covered, which is how a generation comes to write
+ * a second plan for units an operator has already planned.
+ *
+ * Each window is reduced by the SAME qualifying planned quantity, because the windows are cumulative: a unit
+ * already planned covers the earliest need first and therefore reduces the shortage at every later checkpoint
+ * by the same amount. Clamped at zero per window, never negative.
+ *
+ * Sites are NOT dropped when they net to zero. A dropped site is indistinguishable from a site that was never
+ * there, and telling those two apart is the entire subject of this round.
+ */
+function weeklyAiPlanNetSitesByResidual_(sites, plannedByKey, scope) {
+  var report = { applied: true, netted_site_count: 0, fully_covered_site_count: 0, by_key: [] };
+  (sites || []).forEach(function (st) {
+    var key = weeklyAiPlanStr_(scope.company) + '|' + weeklyAiPlanStr_(scope.country) + '|'
+      + weeklyAiPlanStr_(st.marketplace) + '|' + weeklyAiPlanStr_(st.sku);
+    var planned = weeklyAiPlanQty_((plannedByKey || {})[key]);
+    st.qualifyingPlannedQty = planned === null ? 0 : planned;
+    st.grossGapByWindow = st.cumulativeGapByWindow || {};
+    if (planned === null || planned <= 0) { st.residualGapByWindow = st.grossGapByWindow; return; }
+    var net = {}, anyPositive = false, changed = false;
+    for (var w in st.grossGapByWindow) {
+      if (!Object.prototype.hasOwnProperty.call(st.grossGapByWindow, w)) continue;
+      var g = weeklyAiPlanQty_(st.grossGapByWindow[w]);
+      if (g === null) { net[w] = st.grossGapByWindow[w]; continue; }   // an unreadable gap is never netted
+      var v = g - planned;
+      if (v < 0) v = 0;
+      if (v !== g) changed = true;
+      net[w] = v;
+      if (v > 0) anyPositive = true;
+    }
+    st.residualGapByWindow = net;
+    st.cumulativeGapByWindow = net;
+    if (changed) report.netted_site_count++;
+    if (!anyPositive) report.fully_covered_site_count++;
+    if (report.by_key.length < 50) {
+      report.by_key.push({ key: key, marketplace: st.marketplace, sku: st.sku,
+        qualifying_planned_qty: planned, gross: st.grossGapByWindow, residual: net });
+    }
+  });
+  return report;
+}
+
+/**
+ * §C — THE DECISION. Given the recommendation state and the qualifying plan, is "generate nothing" the
+ * CORRECT answer, or is it a refusal?
+ *
+ * It is correct in exactly two shapes, and they are reported as different reasons because they are different
+ * facts an operator would act on differently:
+ *   VALID_ZERO_RECOMMENDATION  — nothing is short. Nothing to do, and nothing was planned that needs review.
+ *   FULLY_COVERED_BY_ACTIVE_PLAN — something IS short and the operator has already planned all of it. The AI
+ *                                  has nothing to ADD, and it must not reduce, cancel or duplicate what is there.
+ * Anything else, including a MISSING_RECOMMENDATION, is NOT a no-action: it is a refusal that keeps its own
+ * code, because a scope nobody could read is not a scope with nothing in it.
+ */
+function weeklyAiPlanNoActionDecision_(recState, planned) {
+  var out = { noAction: false, reason: null, code: WAP_NO_ACTION_CODE_,
+    recommendation_state: recState ? recState.state : null,
+    recommended_qty: recState ? recState.recommended_qty_total : null,
+    qualifying_planned_qty: 0, residual_qty: null, per_scope: [] };
+  if (!recState || recState.state === WAP_RECOMMENDATION_STATES_.MISSING) {
+    out.reason = 'MISSING_RECOMMENDATION';
+    out.missing_reasons = (recState && recState.missing_reasons) || [];
+    return out;
+  }
+  var totalPlanned = 0, totalResidual = 0, anyResidual = false;
+  (recState.per_scope || []).forEach(function (s) {
+    var key = s.key;
+    var p = weeklyAiPlanQty_((planned && planned.byKey) ? planned.byKey[key] : null);
+    if (p === null) p = 0;
+    var residual = weeklyAiPlanResidualQty_(s.recommended_qty, p);
+    totalPlanned += p;
+    if (residual !== null) { totalResidual += residual; if (residual > 0) anyResidual = true; }
+    out.per_scope.push({ key: key, marketplace: s.marketplace, sku: s.sku,
+      recommended_qty: s.recommended_qty, qualifying_planned_qty: p, residual_qty: residual,
+      over_planned_qty: (s.recommended_qty !== null && p > s.recommended_qty) ? (p - s.recommended_qty) : 0 });
+  });
+  out.qualifying_planned_qty = totalPlanned;
+  out.residual_qty = totalResidual;
+  if (anyResidual) { out.reason = 'RESIDUAL_REMAINS'; return out; }
+  out.noAction = true;
+  out.reason = (recState.state === WAP_RECOMMENDATION_STATES_.VALID_ZERO)
+    ? 'VALID_ZERO_RECOMMENDATION' : 'FULLY_COVERED_BY_ACTIVE_PLAN';
+  return out;
+}
+
+/**
+ * §C — the typed SUCCESS envelope for a correct no-action. Zero writes, and the writer is never reached.
+ *
+ * It carries the NEW formal name AND the three keys the shipped page already classifies a zero result from
+ * (`code`, `zero_result`, `job_status`). A success the client cannot recognise is presented to the operator as
+ * a failure, and presenting a correct finish as a failure is the whole defect.
+ */
+function weeklyAiPlanNoActionResponse_(decision, ctx) {
+  ctx = ctx || {};
+  return {
+    success: true,
+    data: {
+      outcome: WAP_NO_ACTION_CODE_,
+      code: 'NO_REPLENISHMENT_REQUIRED',
+      no_action_reason: decision.reason,
+      message: decision.reason === 'FULLY_COVERED_BY_ACTIVE_PLAN'
+        ? 'No action required: the recommended quantity for this scope is already covered by the active'
+          + ' Execution Plan. Nothing was created, changed or cancelled.'
+        : 'No replenishment is required for this scope. Nothing was created, changed or cancelled.',
+      recommendation_state: decision.recommendation_state,
+      recommended_qty: decision.recommended_qty,
+      qualifying_planned_qty: decision.qualifying_planned_qty,
+      residual_qty: decision.residual_qty,
+      per_scope: decision.per_scope,
+      recommendation_authority: ctx.recommendation_authority || null,
+      planning_cycle: ctx.planning_cycle || null,
+      scope: ctx.scope || null,
+      mode: ctx.mode || null,
+      generation_run_id: ctx.generation_run_id || null,
+      // Every mutation counter, explicitly zero. A reader must never have to infer "nothing happened" from
+      // the absence of a number.
+      created_headers: 0, updated_headers: 0, created_lines: 0, updated_lines: 0,
+      cancelled_headers: 0, cancelled_lines: 0, expired_headers: 0, expired_lines: 0,
+      header_created: false, line_created: false,
+      route_count: 0, routes: [], groups: [],
+      requested_qty: decision.recommended_qty, allocated_qty: 0,
+      db_writes: 0, writer_reached: false,
+      // The keys the shipped page's zero-result classifier reads. Kept deliberately.
+      status: 'COMPLETED', zero_result: true, job_status: 'NO_DEMAND',
+      site_count: ctx.site_count == null ? null : ctx.site_count,
+      source_data_as_of: ctx.source_data_as_of || null
+    },
+    errors: []
+  };
 }
 
 /**

@@ -67,7 +67,7 @@
 // §9 — THE CENSUS WAS REPORTING A BUILD IT NO LONGER WAS. Its behaviour changed in A2-R1-R1 (it learned to
 // read the harvest REFUSAL) and again in A2-R1-R2 (route intent + identity preview) while this literal stayed
 // at A2-R1, so a log could not be matched to the code that produced it. It moves with the file now.
-var TEMP_E3_CENSUS_BUILD_ = 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R7';
+var TEMP_E3_CENSUS_BUILD_ = 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R7-R1';
 
 /** Read-only row reader. The Sheet object stays inside this function — the caller gets values, never a writer. */
 // R6-R3 §2 — the OPTIONAL third argument is a metrics sink. §2 requires the diagnostic to report how many
@@ -5254,14 +5254,63 @@ function RUN_R6R7_RECOMMENDATION_AUTHORITY_CENSUS() {
       + ' furthest-horizon reading are BOTH correct answers to different questions.'
   };
   out.gap = view ? view.windows.map(function (w) { return { window: w.window, gap_qty: w.gap_qty }; }) : null;
+  // ==============================================================================================================
+  // R6-R7-R1 §D — `0` AND `null` WERE COMPARED AS QUANTITIES, AND THEY ARE NOT BOTH QUANTITIES.
+  //
+  // The first version reported readings_agree:false for the live row, because the standing authority read 0
+  // and the DTO rule read null. But the DTO's null does not mean 'a different quantity' — it means NO_ACTION,
+  // which is what a standing 0 also means. Comparing them as numbers manufactured a disagreement between two
+  // readings that were saying the same thing, on exactly the row this round is about.
+  //
+  // So each reading is normalised to an ACTION STATE first, and agreement is asked of those:
+  //   NO_ACTION      — nothing to replenish (a stored 0, or no window with a positive quantity)
+  //   ACTION:<qty>   — a quantity to replenish
+  //   NOT_EVALUATED  — nobody has computed this reading; it is not a value and never agrees or disagrees
+  //   UNKNOWN        — the row could not be read at all
+  //
+  // The two nulls are told apart, because they are different facts. The census APPLIES the DTO rule to the row,
+  // so its answer is evaluated. The page's `_irRecoByKey` is empty until somebody presses Generate AI Plan, so
+  // the IN-SESSION DTO is NOT_EVALUATED from here — a server census cannot see a browser's page state, and
+  // reporting its absence as a recommendation of null would be inventing a third reading.
+  // ==============================================================================================================
+  function actionState(evaluated, qty) {
+    if (!evaluated) return 'NOT_EVALUATED';
+    if (qty === null || qty === undefined) return 'NO_ACTION';
+    return qty > 0 ? ('ACTION:' + qty) : 'NO_ACTION';
+  }
+  var rowReadable = !!view && CENSUS_str_(view.calculation_status) === 'READY';
+  var standingState = rowReadable ? actionState(true, standing) : 'UNKNOWN';
+  var dtoState = rowReadable ? actionState(true, earliest) : 'UNKNOWN';
   out.suggested_qty = {
     standing_authority_value: standing,
+    standing_authority_state: standingState,
     standing_authority_rule: '_irSuggestedQtyState_ -> d90_suggested_qty when calculation_status is READY;'
       + ' PENDING and NONE are NOT zero and print as an ellipsis / em dash.',
     ai_plan_dto_value: earliest,
+    ai_plan_dto_state: dtoState,
+    ai_plan_dto_evaluated: rowReadable,
     ai_plan_dto_rule: 'KMREC.generateInventoryRecommendation -> the EARLIEST window with a positive stored'
-      + ' suggested qty (D18 first). NO_ACTION when none is positive.',
-    readings_agree: (standing === earliest)
+      + ' suggested qty (D18 first). NO_ACTION when none is positive — which is a STATE, not a quantity.',
+    // The page-state reading, which a server census cannot see and must not guess at.
+    ai_plan_dto_in_session_state: 'NOT_EVALUATED',
+    ai_plan_dto_in_session_note: '_irRecoByKey is populated only by a Generate AI Plan click, in the browser.'
+      + ' Its absence is NOT a recommendation of null and is never compared with the standing authority.',
+    // Agreement is between STATES, and only when both were evaluated.
+    readings_agree: (standingState !== 'UNKNOWN' && standingState !== 'NOT_EVALUATED'
+      && dtoState !== 'UNKNOWN' && dtoState !== 'NOT_EVALUATED' && standingState === dtoState),
+    readings_comparable: (standingState !== 'UNKNOWN' && standingState !== 'NOT_EVALUATED'
+      && dtoState !== 'UNKNOWN' && dtoState !== 'NOT_EVALUATED')
+  };
+  // §D — the four facts a consumer needs to know WHICH evaluation this is, beside the answer itself.
+  out.current_run = {
+    calculation_run_id: (lineage && lineage.run_id) || null,
+    calculated_at: view ? view.calculated_at : null,
+    calculation_date: view ? view.calculation_date : null,
+    calculation_status: view ? view.calculation_status : null,
+    authority_rule: 'inventory_replenishment_gap, the row for the exact (company, country, marketplace, sku).'
+      + ' The quantity is the FURTHEST cumulative window (d90_suggested_qty); the windows are cumulative'
+      + ' checkpoints and summing them would double-count need. A standing 0 and an AI NO_ACTION are the'
+      + ' SAME state, and this census compares them as states rather than as numbers.'
   };
 
   // ---- 7. THE SOURCE WAREHOUSE. The gap row does not carry one: materialization is a per-destination
@@ -5312,28 +5361,94 @@ function RUN_R6R7_RECOMMENDATION_AUTHORITY_CENSUS() {
         hit.push('MATERIALIZED_SUGGESTED_QTY (d90_suggested_qty)');
       }
     }
+    // R6-R7-R1 §G — A SCREEN IS A PAST OBSERVATION, AND A PAST OBSERVATION THAT NO LONGER REPRODUCES IS
+    // HISTORY, NOT A CONFLICT.
+    //
+    // The first version STOPPED the round when neither rule reproduced a disputed value, on the reasoning
+    // that a third source must be feeding the cell. That is one possible explanation and it is not the
+    // likeliest: a row that has been recalculated since the screenshot explains it completely, and no
+    // amount of reading can distinguish the two when the earlier run is gone. Guessing a third source would
+    // be inventing an authority, and blocking on it would make an unfalsifiable claim a permanent blocker.
+    //
+    // So it is LABELLED. It is never an authority for a write either way, which is the property that
+    // actually matters, and the census looks for real read-only lineage before saying it has none.
+    var lineageEvidence = [];
+    if (!hit.length) {
+      mine.forEach(function (r) {
+        var d = CENSUS_str_(r.calculation_date), when = CENSUS_str_(r.calculated_at);
+        W.forEach(function (w) {
+          var lc = String(w).toLowerCase();
+          if (CENSUS_r6r7Num_(r[lc + '_suggested_qty']) === value) {
+            lineageEvidence.push({ window: w, calculation_date: d, calculated_at: when,
+              calculation_status: CENSUS_str_(r.calculation_status) });
+          }
+        });
+      });
+    }
     return { display_label: label, display_value: value,
       reproduced_by: hit,
       resolved: hit.length > 0,
-      // A number that neither rule reproduces is the case that must STOP the round: it means a THIRD source
-      // is feeding that cell, and no activation should be designed on top of an unidentified authority.
-      note: hit.length ? '' : 'NOT reproducible from the current row by either shipped rule. Either the row'
-        + ' has been recalculated since that screen was taken, or a third source is feeding the cell.' };
+      status: hit.length ? 'REPRODUCED_BY_A_CURRENT_RULE' : 'HISTORICAL_OR_SUPERSEDED_UNRESOLVED',
+      is_write_authority: false,
+      lineage_evidence: lineageEvidence,
+      note: hit.length ? ''
+        : (lineageEvidence.length
+            ? 'Not reproducible from the CURRENT reading rules; a stored row does still carry this value,'
+              + ' and that row is named in lineage_evidence. Historical, and never a write authority.'
+            : 'Not reproducible from the current row by either shipped rule, and no stored row carries it.'
+              + ' Most consistent with a recalculation since that screen was taken. NOT treated as evidence'
+              + ' of a third source: that would be inventing an authority, and no data is changed on it.') };
   }
   out.disputed_value_provenance = [
     provenance('earlier screen, Recommended', R6R7_DISPUTED_DISPLAY_.earlier.recommended),
     provenance('later screen, Recommended', R6R7_DISPUTED_DISPLAY_.later.recommended)
   ];
   var unresolved = out.disputed_value_provenance.filter(function (p) { return !p.resolved; });
-  // BOTH numbers reproducible is the ideal; ONE reproducible with the other explained as a superseded
-  // calculation is still an established authority, because the question "which rule owns the cell" has an
-  // answer either way. NEITHER reproducible is not.
-  P('at_least_one_disputed_value_is_reproduced_by_a_named_rule', 'at least 1',
-    (2 - unresolved.length) + ' of 2', unresolved.length < 2);
+  out.historical_unresolved = unresolved.map(function (p) {
+    return { display_value: p.display_value, status: p.status, lineage_evidence: p.lineage_evidence }; });
+  // R6-R7-R1 §G — THE AUTHORITY IS SETTLED BY THE CURRENT ROW, NOT BY AN OLD SCREENSHOT.
+  //
+  // The predicate this replaces failed the whole census when neither rule reproduced an earlier display
+  // value, which makes a past observation nobody can re-read into a permanent blocker. What has to be true
+  // for an activation is that TODAY'S authority is readable and unambiguous — which the row predicates
+  // above already establish. An unreproducible past value is recorded as HISTORICAL_OR_SUPERSEDED_UNRESOLVED
+  // and is barred from being a write authority; it is not a reason to refuse to proceed.
+  P('every_disputed_value_is_either_reproduced_or_labelled_historical', 2,
+    out.disputed_value_provenance.filter(function (p) {
+      return p.resolved || p.status === 'HISTORICAL_OR_SUPERSEDED_UNRESOLVED'; }).length,
+    out.disputed_value_provenance.every(function (p) {
+      return (p.resolved || p.status === 'HISTORICAL_OR_SUPERSEDED_UNRESOLVED') && p.is_write_authority === false; }));
   P('the_two_readings_are_explained_by_one_row_and_two_rules',
     'a single row, read by two different shipped rules',
     view ? ('d90=' + standing + ' vs earliest-actionable=' + earliest) : null,
     !!view);
+  // R6-R7-R1 §D — a stored 0 and an AI NO_ACTION are the SAME state and must never be reported as a
+  // disagreement. That is the defect this closes, and it is a claim about this code rather than about the
+  // data: a row with an open early window and a closed horizon genuinely reads NO_ACTION on one rule and a
+  // quantity on the other, and a census cannot refuse its way out of a true fact.
+  P('a_zero_and_a_no_action_are_not_reported_as_disagreeing',
+    'NO_ACTION vs NO_ACTION reported as agreement',
+    out.suggested_qty.standing_authority_state + ' vs ' + out.suggested_qty.ai_plan_dto_state
+      + ' -> agree ' + out.suggested_qty.readings_agree,
+    !(out.suggested_qty.standing_authority_state === 'NO_ACTION'
+      && out.suggested_qty.ai_plan_dto_state === 'NO_ACTION') || out.suggested_qty.readings_agree === true);
+  // A genuine divergence is RECORDED rather than refused. It is the page-level defect §2 named, and an
+  // operator needs to see it; it is not a reason to withhold the authority, which the standing rule owns.
+  out.suggested_qty.divergence = (out.suggested_qty.readings_comparable && !out.suggested_qty.readings_agree)
+    ? { kind: 'TWO_RULES_ONE_CELL', standing: out.suggested_qty.standing_authority_state,
+        ai_plan_dto: out.suggested_qty.ai_plan_dto_state,
+        note: 'both readings are correct answers to different questions (short NOW versus short at the'
+          + ' horizon). The authority for a WRITE is the standing rule; the DTO is advisory.' }
+    : null;
+  // AND THE ROW MUST ACTUALLY STATE SOMETHING. A BLOCKED row, a missing one, or one with a blank where a
+  // number belongs settles nothing, and every predicate above can pass while that is true.
+  var statesAQuantity = !!view && CENSUS_str_(view.calculation_status) === 'READY'
+    && view.windows.length > 0 && view.windows.every(function (w) { return typeof w.suggested_qty === 'number'; });
+  P('the_authoritative_row_states_a_quantity',
+    'READY, with a finite number in every window',
+    view ? (view.calculation_status + ' / ' + view.windows.map(function (w) {
+      return w.window + '=' + (w.suggested_qty === null ? '(blank)' : w.suggested_qty); }).join(' ')) : null,
+    statesAQuantity);
 
   // ---- READ-ONLY SELF-CHECKS. -------------------------------------------------------------------------------
   P('writer_not_constructed', false, out.writer_constructed, out.writer_constructed === false);
@@ -5379,6 +5494,12 @@ function RUN_R6R7_CONTROLLED_AI_PLAN_PREFLIGHT() {
     manual_route_snapshots: [],
     idempotency_contract: null, optimistic_concurrency_contract: null, ack_unknown_contract: null,
     flag: null, allowlist: null,
+    // R6-R7-R1 §F — WHAT THE PRODUCTION HANDLER WOULD ACTUALLY ANSWER, resolved from the production
+    // functions themselves rather than restated here. The first version of this preflight returned READY
+    // while the real path returned STOP / REQUESTED_SCOPE_EMPTY for the same scope, which is the worst
+    // possible failure mode for a preflight: it certified a run that could not happen.
+    production_path: null,
+    parity: null,
     verdict: 'STOP', stop_reason: ''
   };
   function P(name, expected, observed, pass) { return CENSUS_r6r6r3P_(out, name, expected, observed, pass); }
@@ -5406,6 +5527,20 @@ function RUN_R6R7_CONTROLLED_AI_PLAN_PREFLIGHT() {
     rec.verdict === 'RECOMMENDATION_AUTHORITY_ESTABLISHED');
   var standing = rec.suggested_qty ? rec.suggested_qty.standing_authority_value : null;
   var earliest = rec.suggested_qty ? rec.suggested_qty.ai_plan_dto_value : null;
+  // ==============================================================================================================
+  // R6-R7-R1 §F — THE PRODUCTION PATH IS ASKED, AND ITS ANSWER OUTRANKS THIS FILE'S.
+  //
+  // These are 61_'s OWN functions — the same ones handleGenerateWeeklyAiPlanDraft_ reaches through — not a
+  // second implementation of the same rules. A wrapper that decided readiness from its own reasoning could
+  // agree with production by luck and disagree without anyone noticing, which is exactly what happened.
+  //
+  // A project that does not have 61_ synced cannot answer, and that is reported as UNAVAILABLE rather than
+  // defaulted to either verdict: 'we could not ask' is not 'the answer was yes'.
+  // ==============================================================================================================
+  out.production_path = CENSUS_r6r7ProductionPath_();
+  P('production_path_authority_is_present', true, out.production_path.available,
+    out.production_path.available === true);
+
   out.authoritative_recommendation = {
     standing_authority_value: standing,
     ai_plan_dto_value: earliest,
@@ -5693,14 +5828,114 @@ function RUN_R6R7_CONTROLLED_AI_PLAN_PREFLIGHT() {
   P('submit_calls_is_zero', 0, out.submit_calls, out.submit_calls === 0);
   P('route_save_calls_is_zero', 0, out.route_save_calls, out.route_save_calls === 0);
 
-  if (out.predicates_failed === 0) {
-    out.verdict = 'CONTROLLED_AI_PLAN_READY';
-  } else {
+  // ---- §F PARITY. The wrapper's verdict is DERIVED from the production answer, never asserted beside it. ----
+  //
+  // Three outcomes, and each is the production path's outcome under a different name:
+  //   READY_NO_ACTION           — production would return AI_PLAN_NO_ACTION with zero writes. Pressing
+  //                               Generate is safe AND would create nothing. That is a finish, not a run.
+  //   CONTROLLED_AI_PLAN_READY  — production has a residual to generate and every gate is satisfied.
+  //   STOP                      — anything else, INCLUDING the case where this file's own checks all pass
+  //                               but production would refuse. That case is the whole reason this exists.
+  var pp = out.production_path || {};
+  var wouldWrite = (pp.residual_qty !== null && pp.residual_qty !== undefined && pp.residual_qty > 0);
+  out.parity = {
+    wrapper_own_checks_passed: out.predicates_failed === 0,
+    production_path_available: pp.available === true,
+    production_path_outcome: pp.outcome || null,
+    production_path_code: pp.code || null,
+    production_path_reason: pp.reason || null,
+    production_would_write: wouldWrite,
+    rule: 'the wrapper may only report a success this file can point at in the production answer. When the'
+      + ' production path would refuse, the wrapper STOPS — a preflight that certifies a run which cannot'
+      + ' happen is worse than no preflight.'
+  };
+  P('wrapper_verdict_is_derived_from_the_production_path', true, out.parity.production_path_available,
+    out.parity.production_path_available === true);
+  P('production_path_would_not_refuse', 'AI_PLAN_NO_ACTION or a residual to generate',
+    (pp.outcome || 'UNAVAILABLE') + (wouldWrite ? ' (residual ' + pp.residual_qty + ')' : ''),
+    pp.available === true && (pp.outcome === 'AI_PLAN_NO_ACTION' || wouldWrite));
+
+  if (out.predicates_failed !== 0) {
     out.verdict = 'STOP';
     out.stop_reason = out.predicates_failed + ' predicate(s) failed: '
       + out.predicates.filter(function (p) { return !p.pass; }).map(function (p) { return p.predicate; }).join(', ');
+  } else if (pp.outcome === 'AI_PLAN_NO_ACTION') {
+    out.verdict = 'READY_NO_ACTION';
+  } else {
+    out.verdict = 'CONTROLLED_AI_PLAN_READY';
   }
   return CENSUS_r6r7Finish_(out);
+}
+
+/**
+ * §F — ASK 61_ WHAT IT WOULD ANSWER. Read-only, and it constructs no writer: the three functions called
+ * here are pure classifiers over rows this census has already read, and the only sheet access is through
+ * 61_'s own reader.
+ */
+function CENSUS_r6r7ProductionPath_() {
+  var out = { available: false, unavailable_reason: null, outcome: null, code: null, reason: null,
+    recommendation_state: null, recommended_qty: null, qualifying_planned_qty: null, residual_qty: null,
+    per_scope: [], authority: null, db_writes: 0, writer_reached: false };
+  var missing = [];
+  if (typeof weeklyAiPlanRecommendationState_ !== 'function') missing.push('weeklyAiPlanRecommendationState_');
+  if (typeof weeklyAiPlanQualifyingPlannedQty_ !== 'function') missing.push('weeklyAiPlanQualifyingPlannedQty_');
+  if (typeof weeklyAiPlanNoActionDecision_ !== 'function') missing.push('weeklyAiPlanNoActionDecision_');
+  if (typeof weeklyAiPlanTargetScopes_ !== 'function') missing.push('weeklyAiPlanTargetScopes_');
+  if (typeof weeklyAiPlanCanonicalDemand_ !== 'function') missing.push('weeklyAiPlanCanonicalDemand_');
+  if (missing.length) {
+    out.unavailable_reason = 'PRODUCTION_AUTHORITY_NOT_SYNCED: ' + missing.join(', ')
+      + '. This project does not carry the R6-R7-R1 no-action authority, so the production answer cannot be'
+      + ' asked for — which is NOT the same as it being yes.';
+    return out;
+  }
+  var cycle = null;
+  try {
+    var cc = (typeof gapCalcResolveContext_ === 'function') ? gapCalcResolveContext_('INVENTORY') : null;
+    cycle = (cc && cc.ok) ? cc.planningCycle : null;
+  } catch (eC) { cycle = null; }
+  var scope = { company: R6R7_SCOPE_.company, country: R6R7_SCOPE_.country,
+    marketplace: R6R7_SCOPE_.marketplace, planningCycle: cycle };
+  var ss = null;
+  try { ss = SpreadsheetApp.openById(prodExpectedDbId_());
+    if (typeof prodAssertDbTarget_ === 'function') prodAssertDbTarget_(ss, prodExpectedDbId_()); }
+  catch (eO) { out.unavailable_reason = 'PRODUCTION_DATABASE_UNREACHABLE: ' + CENSUS_str_(eO && eO.message); return out; }
+  var canonical, target, recState, planned, decision;
+  try {
+    var calcDate = null;
+    try {
+      var cc2 = (typeof gapCalcResolveContext_ === 'function') ? gapCalcResolveContext_('INVENTORY') : null;
+      calcDate = (cc2 && cc2.ok) ? cc2.calculationDate : null;
+    } catch (eD) { calcDate = null; }
+    canonical = weeklyAiPlanCanonicalDemand_(ss, scope, calcDate);
+    target = weeklyAiPlanTargetScopes_(scope, scope.marketplace);
+    recState = weeklyAiPlanRecommendationState_(canonical, target);
+    planned = weeklyAiPlanQualifyingPlannedQty_(ss, scope);
+    decision = weeklyAiPlanNoActionDecision_(recState, planned);
+  } catch (eX) {
+    out.unavailable_reason = 'PRODUCTION_AUTHORITY_THREW: ' + CENSUS_str_(eX && eX.message);
+    return out;
+  }
+  out.available = true;
+  out.recommendation_state = decision.recommendation_state;
+  out.recommended_qty = decision.recommended_qty;
+  out.qualifying_planned_qty = decision.qualifying_planned_qty;
+  out.residual_qty = decision.residual_qty;
+  out.per_scope = decision.per_scope || [];
+  out.reason = decision.reason;
+  out.authority = { rule: recState.authority_rule, accepted_calculation_date: recState.accepted_calculation_date,
+    current_run: recState.current_run, per_scope: recState.per_scope,
+    qualification: planned.authority, planned_rows: planned.rows, planned_excluded: planned.excluded };
+  if (decision.noAction) {
+    out.outcome = 'AI_PLAN_NO_ACTION';
+    out.code = 'NO_REPLENISHMENT_REQUIRED';
+  } else if (decision.recommendation_state === 'MISSING_RECOMMENDATION') {
+    out.outcome = 'REFUSAL';
+    out.code = 'REQUESTED_SCOPE_EMPTY';
+  } else {
+    out.outcome = 'WOULD_GENERATE';
+    out.code = null;
+  }
+  return out;
 }
 
 // ----------------------------------------------------------------------------------------------------------------

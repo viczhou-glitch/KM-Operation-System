@@ -79,7 +79,8 @@ var G00 = read('assets/specs/active/apps-script/00_config.gs');
 var G16 = read('assets/specs/active/apps-script/16_shipping_allocation_handlers.gs');
 var G13 = read('assets/specs/active/apps-script/13_procurement_handlers.gs');
 var G43 = read('assets/specs/active/apps-script/43_api_v1_gap_materialization.gs');
-var G61 = read('assets/specs/active/apps-script/61_api_v1_weekly_ai_plan.gs');
+var GLOBAL_G61 = read('assets/specs/active/apps-script/61_api_v1_weekly_ai_plan.gs');
+var G61 = GLOBAL_G61;
 var G69 = read('assets/specs/active/apps-script/69_api_v1_route_identity_contract.gs');
 var G69L = read('assets/specs/active/apps-script/69_api_v1_ai_plan_lifecycle.gs');
 var BUNDLE = read('assets/specs/active/apps-script/90_generated_supply_planning_bundle.gs');
@@ -88,7 +89,7 @@ var KMREC = read('assets/js/core/supply-recommendation.js');
 var E3SUITE = read('assets/tests/ai-plan-activation-and-execution-row-layout-f1-7n-fc-1b-e3.test.js');
 var RO = require('./_release-order.js');
 
-var STAMP = 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R7';
+var STAMP = 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R7-R1';
 var SKU = 'CO1100-R';
 var A_HEADER = 'SADH-K4-38523A90', A_LINE = 'SADL-K2-92B8BAD2';
 var B_HEADER = 'SADH-K4-A3872518', B_LINE = 'SADL-K2-344FB2B2';
@@ -97,6 +98,12 @@ var REPAIR_ACTOR = 'r6r6r3-compensating-repair';
 var TS_A = 'Sun Sep 06 2026 14:31:12 GMT+0800 (Taiwan Standard Time)';
 var TS_B = 'Sun Sep 06 2026 09:56:04 GMT+0800 (Taiwan Standard Time)';
 var TS_GAP = 'Sat Sep 05 2026 03:00:00 GMT+0800 (Taiwan Standard Time)';
+// The snapshot date the freshness authority will accept, DERIVED from the same clock it reads (Taipei,
+// UTC+8). A literal here would pass today and fail tomorrow — an equality with now, in a fixture.
+var GAP_DATE = new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10);
+// And the cycle the snapshot belongs to, in the shape the authority compares against (RECO-YYYY-MM).
+var GAP_CYCLE = 'RECO-' + GAP_DATE.slice(0, 7);
+var GAP_YESTERDAY = new Date(Date.now() + 8 * 3600 * 1000 - 86400000).toISOString().slice(0, 10);
 
 // ================================================================================================================
 // THE DOUBLE. Same shape as the R6-R6 family's, plus the materialized gap table the recommendation authority
@@ -182,7 +189,7 @@ var PROD_B_L = lineRow({ allocation_draft_line_id: B_LINE, allocation_draft_id: 
 // The materialized gap row. THE DEFAULT REPRODUCES THE DISPUTED SCREENS: 920 short at D18, closed by D90.
 function gapRow(o) { var d = {
   company: 'ResUS', country: 'US', marketplace: 'Amazon', sku: SKU,
-  calculation_status: 'READY', calculation_date: '2026-09-05',
+  calculation_status: 'READY', calculation_date: GAP_DATE,
   d18_gap_qty: 920, d18_suggested_qty: 920, d30_gap_qty: 400, d30_suggested_qty: 400,
   d45_gap_qty: 0, d45_suggested_qty: 0, d90_gap_qty: 0, d90_suggested_qty: 0,
   note: '', calculated_at: TS_GAP, updated_at: TS_GAP };
@@ -191,8 +198,9 @@ function gapRow(o) { var d = {
 // ================================================================================================================
 // THE WORLD.
 // ================================================================================================================
-function World(over, censusSrc) {
+function World(over, censusSrc, g61Src) {
   over = over || {};
+  var G61 = g61Src || GLOBAL_G61;
   var sheets = {};
   var H = new FakeSheet(HDR_FULL), L = new FakeSheet(LINE_FULL), G = new FakeSheet(GAP_HDR);
   sheets['shipping_allocation_drafts'] = H;
@@ -228,7 +236,7 @@ function World(over, censusSrc) {
   sb.Session = { getScriptTimeZone: function () { return 'Asia/Taipei'; } };
   var props = over.gapJob === null ? null : JSON.stringify(over.gapJob || {
     product: 'INVENTORY', runId: 'GAP-INV-20260905-0300', status: 'DONE',
-    planningCycle: '2026-W37', calculationDate: '2026-09-05', finishedAt: TS_GAP });
+    planningCycle: GAP_CYCLE, calculationDate: GAP_DATE, finishedAt: TS_GAP });
   sb.PropertiesService = { getScriptProperties: function () { return {
     getProperty: function (k) { return k === 'GAP_JOB_INVENTORY' ? props : null; } }; } };
 
@@ -245,7 +253,7 @@ function World(over, censusSrc) {
     'function prodRequireSheet_(ss, n) { return ss.getSheetByName(n); }',
     'function jsonResponse_(o) { var s = JSON.stringify(o); return { getContent: function () { return s; } }; }',
     'function gapCalcResolveContext_() { return { ok: true, planningCycle: "'
-      + (over.cycle === undefined ? '2026-W37' : over.cycle) + '" }; }'
+      + (over.cycle === undefined ? GAP_CYCLE : over.cycle) + '" }; }'
   ].join(NL), ctx);
   // 69_ route identity + 69_ lifecycle + 43_ table identity + 00_ the two gates + 61_'s own declarations.
   vm.runInContext([
@@ -280,6 +288,40 @@ function World(over, censusSrc) {
     extractFn(G61, 'weeklyAiPlanStr_'),
     extractFn(G61, 'weeklyAiPlanResolveGapRunLineage_')
   ].join(NL), ctx);
+  // R6-R7-R1 — THE REAL PRODUCTION AUTHORITY, not a second copy of its rules. The canonical-demand reader
+  // comes with it (and the freshness authority it calls, from the bundle) because the state classifier reads
+  // that reader's OUTPUT SHAPE — so a field renamed on one side and not the other fails here rather than in
+  // production.
+  vm.runInContext([
+    extractVar(G43, 'GAP_CALC_UTC_OFFSET_MIN_'),
+    extractFn(G43, 'gapCalcNowMs_'),
+    extractVar(G61, 'WAP_GAP_TABLE_'),
+    extractVar(G61, 'WAP_GAP_REQUIRED_COLS_'),
+    extractVar(G61, 'WAP_GAP_WINDOW_COL_'),
+    extractVar(G61, 'WAP_RECOMMENDATION_STATES_'),
+    extractVar(G61, 'WAP_NO_ACTION_CODE_'),
+    extractFn(G61, 'weeklyAiPlanNum_'),
+    extractFn(G61, 'weeklyAiPlanErr_'),
+    extractFn(G61, 'weeklyAiPlanCanonicalDate_'),
+    extractFn(G61, 'weeklyAiPlanGapSchedule_'),
+    extractFn(G61, 'weeklyAiPlanGapJobState_'),
+    extractFn(G61, 'weeklyAiPlanCanonicalDemand_'),
+    extractFn(G61, 'weeklyAiPlanTargetScopes_'),
+    extractFn(G61, 'weeklyAiPlanQty_'),
+    extractFn(G61, 'weeklyAiPlanRecommendationState_'),
+    extractFn(G61, 'weeklyAiPlanIsAiRow_'),
+    extractFn(G61, 'weeklyAiPlanQualifyingPlannedQty_'),
+    extractFn(G61, 'weeklyAiPlanResidualQty_'),
+    extractFn(G61, 'weeklyAiPlanNetSitesByResidual_'),
+    extractFn(G61, 'weeklyAiPlanNoActionDecision_'),
+    extractFn(G61, 'weeklyAiPlanNoActionResponse_'),
+    extractVar(G16, 'SAD_TERMINAL_STATUSES_'),
+    extractVar(G16, 'SAD_TERMINAL_LINE_STATUSES_'),
+    'function inventoryAiPlanActivationAllowlist_() { return INVENTORY_AI_PLAN_ACTIVATION_ALLOWLIST_; }',
+    'function gapReadObjects_(ss, name) { var sh = ss.getSheetByName(name); if (!sh || sh.getLastRow() < 2) return [];'
+      + ' var v = sh.getDataRange().getValues(); var hd = v[0]; var o = [];'
+      + ' for (var r = 1; r < v.length; r++) { var x = {}; for (var c = 0; c < hd.length; c++) if (hd[c]) x[hd[c]] = v[r][c]; o.push(x); } return o; }'
+  ].join(NL), ctx);
   vm.runInContext([extractFn(G13, 'procurementEnsureSheet_'), extractFn(G13, 'procurementAppendByHeader_'),
     extractFn(G13, 'procurementFindRow_')].join(NL), ctx);
   vm.runInContext(SAD_CONSTS.map(function (v) { return extractVar(G16, v); }).join(NL), ctx);
@@ -296,7 +338,7 @@ function World(over, censusSrc) {
         destination: 'Amazon', method: 'sea_express', last_mile: 'truck', line_count: 1, total_qty: 920 }]
     : over.proposed;
   vm.runInContext('RUN_E3_CENSUS_RESUS_US_AMAZON_CO1100R = function () { return { planning_cycle: "'
-    + (over.cycle === undefined ? '2026-W37' : over.cycle) + '", allocator: { routes: '
+    + (over.cycle === undefined ? GAP_CYCLE : over.cycle) + '", allocator: { routes: '
     + JSON.stringify(proposed) + ' } }; };', ctx);
 
   this.ctx = ctx; this.sheets = sheets; this.log = LOG;
@@ -327,7 +369,30 @@ eq(A.row_count, 1, 'A2 exactly one authoritative row for the exact four-part key
 // THE WHOLE POINT OF §2: the two numbers are one row read by two rules, and the census SAYS which is which.
 eq(A.suggested_qty.standing_authority_value, 0, 'A3 the standing authority reads d90 — and it is 0');
 eq(A.suggested_qty.ai_plan_dto_value, 920, 'A3a the AI Plan DTO reads the earliest actionable window — 920');
-eq(A.suggested_qty.readings_agree, false, 'A3b and the census states that they do not agree');
+// R6-R7-R1 §D — each reading is normalised to an ACTION STATE before anything is compared, because a
+// stored 0 and an AI NO_ACTION are the same state and were being compared as numbers.
+eq(A.suggested_qty.standing_authority_state, 'NO_ACTION', 'A3b0 the standing 0 is the NO_ACTION state');
+eq(A.suggested_qty.ai_plan_dto_state, 'ACTION:920', 'A3b1 and the DTO reading is a genuine action');
+eq(A.suggested_qty.readings_agree, false, 'A3b and on THIS row they genuinely do not agree');
+eq(A.suggested_qty.divergence.kind, 'TWO_RULES_ONE_CELL',
+  'A3b2 which is RECORDED as the page-level divergence it is, not refused');
+eq(A.suggested_qty.ai_plan_dto_in_session_state, 'NOT_EVALUATED',
+  'A3b3 while the IN-SESSION DTO is NOT_EVALUATED — a server census cannot see a browser\'s page state');
+eq(A.current_run.calculation_status, 'READY', 'A3b4 and the run is named: status,');
+eq(A.current_run.calculated_at, TS_GAP, 'A3b5 calculated_at,');
+eq(A.current_run.calculation_run_id, 'GAP-INV-20260905-0300', 'A3b6 run id,');
+ok(/FURTHEST cumulative window/.test(A.current_run.authority_rule), 'A3b7 and the rule itself');
+
+// THE ACTUAL PRODUCTION SHAPE: every window a stored, finite 0. The two rules must now AGREE, and the
+// defect this round closes is that they did not — because `0 === null` is false.
+var A_LIVE = new World({ gap: { d18_gap_qty: 0, d18_suggested_qty: 0, d30_gap_qty: 0, d30_suggested_qty: 0 } })
+  .run('RUN_R6R7_RECOMMENDATION_AUTHORITY_CENSUS').res;
+eq(A_LIVE.suggested_qty.standing_authority_state, 'NO_ACTION', 'A3c the live row reads NO_ACTION standing,');
+eq(A_LIVE.suggested_qty.ai_plan_dto_state, 'NO_ACTION', 'A3c1 NO_ACTION on the DTO rule,');
+eq(A_LIVE.suggested_qty.ai_plan_dto_value, null, 'A3c2 whose VALUE is null — a state, not a quantity');
+eq(A_LIVE.suggested_qty.readings_agree, true, 'A3c3 and they AGREE, which is the §D fix');
+eq(A_LIVE.suggested_qty.divergence, null, 'A3c4 with no divergence to record');
+eq(A_LIVE.verdict, 'RECOMMENDATION_AUTHORITY_ESTABLISHED', 'A3c5 and the authority is established');
 eq(A.recommendation_window.ai_plan_dto_window, 'D18', 'A3c naming the window the DTO chose');
 var prov = A.disputed_value_provenance;
 eq(prov.length, 2, 'A4 both disputed screen values are accounted for');
@@ -377,12 +442,31 @@ var A_MISSING = new World({ dropGap: true }).run('RUN_R6R7_RECOMMENDATION_AUTHOR
 eq(A_MISSING.verdict, 'STOP_RECOMMENDATION_CONFLICT', 'A15 no row at all STOPS');
 eq(A_MISSING.row_count, 0, 'A15a and says so');
 
-// A THIRD SOURCE. Neither rule reproduces either number: the cell is fed by something nobody has identified.
-var A_THIRD = new World({ gap: { d18_suggested_qty: 111, d30_suggested_qty: 111, d45_suggested_qty: 111,
-  d90_suggested_qty: 111 } }).run('RUN_R6R7_RECOMMENDATION_AUTHORITY_CENSUS').res;
-eq(A_THIRD.verdict, 'STOP_RECOMMENDATION_CONFLICT', 'A16 a value neither shipped rule reproduces STOPS');
-ok(failed(A_THIRD).indexOf('at_least_one_disputed_value_is_reproduced_by_a_named_rule') !== -1,
-  'A16a naming the unidentified authority as the reason');
+// R6-R7-R1 §G — A PAST OBSERVATION THAT NO LONGER REPRODUCES IS HISTORY, NOT A BLOCKER.
+//
+// The first version STOPPED here, reasoning that a third source must be feeding the cell. A row recalculated
+// since the screenshot explains it just as well, nothing readable can separate the two, and blocking on an
+// unfalsifiable claim would make an old screenshot a permanent veto over an activation.
+var A_THIRD = new World({ gap: { d18_gap_qty: 111, d18_suggested_qty: 111, d30_suggested_qty: 111,
+  d45_suggested_qty: 111, d90_suggested_qty: 111 } }).run('RUN_R6R7_RECOMMENDATION_AUTHORITY_CENSUS').res;
+eq(A_THIRD.verdict, 'RECOMMENDATION_AUTHORITY_ESTABLISHED',
+  'A16 today\'s row settles the authority even when neither past display value reproduces');
+eq(A_THIRD.disputed_value_provenance.map(function (p) { return p.status; }),
+  ['HISTORICAL_OR_SUPERSEDED_UNRESOLVED', 'HISTORICAL_OR_SUPERSEDED_UNRESOLVED'],
+  'A16a and both are LABELLED historical rather than guessed at');
+ok(A_THIRD.disputed_value_provenance.every(function (p) { return p.is_write_authority === false; }),
+  'A16b neither is a write authority, which is the property that actually matters');
+ok(A_THIRD.disputed_value_provenance.every(function (p) { return p.lineage_evidence.length === 0; }),
+  'A16c and no lineage evidence is invented when none exists');
+ok(!/third source/.test(A_THIRD.disputed_value_provenance[0].note.replace(/NOT treated as evidence[\s\S]*/, '')),
+  'A16d the note does not assert a third source it cannot see');
+// When a stored row DOES still carry the value, that is read-only lineage and it is reported.
+var A_HIST = new World({ gap: { d18_gap_qty: 0, d18_suggested_qty: 0, d30_suggested_qty: 0 },
+  extraGap: [{ marketplace: 'Other', d18_suggested_qty: 920 }] })
+  .run('RUN_R6R7_RECOMMENDATION_AUTHORITY_CENSUS').res;
+eq(A_HIST.verdict, 'RECOMMENDATION_AUTHORITY_ESTABLISHED',
+  'A16e a row for ANOTHER marketplace does not disturb this key\'s authority');
+eq(A_HIST.row_count, 1, 'A16f because the key match is exact on all four axes');
 
 // A CANONICAL ZERO. Every window a stored, finite 0 — both rules agree, and the round proceeds.
 var A_ZERO = new World({ gap: { d18_gap_qty: 0, d18_suggested_qty: 0, d30_gap_qty: 0, d30_suggested_qty: 0 } })
@@ -397,7 +481,17 @@ section('B — §4 the controlled AI Plan preflight');
 var wB = new World();
 var B = wB.run('RUN_R6R7_CONTROLLED_AI_PLAN_PREFLIGHT').res;
 eq(failed(B), [], 'B1 the preflight passes every predicate');
-eq(B.verdict, 'CONTROLLED_AI_PLAN_READY', 'B1a and returns the one success verdict §4 allows');
+// R6-R7-R1 §F — READY_NO_ACTION, because that is what the PRODUCTION path answers for this scope. The
+// first version returned CONTROLLED_AI_PLAN_READY while the real handler returned STOP for the same rows,
+// which is the worst failure mode a preflight has: certifying a run that cannot happen.
+eq(B.verdict, 'READY_NO_ACTION', 'B1a and returns the verdict the production path proves');
+eq(B.production_path.outcome, 'AI_PLAN_NO_ACTION', 'B1a1 the production outcome, by name');
+eq(B.production_path.code, 'NO_REPLENISHMENT_REQUIRED', 'B1a2 with its formal code');
+eq(B.production_path.reason, 'FULLY_COVERED_BY_ACTIVE_PLAN',
+  'B1a3 and the reason: 520 already planned covers a recommendation of 0');
+eq([B.production_path.recommended_qty, B.production_path.qualifying_planned_qty, B.production_path.residual_qty],
+  [0, 520, 0], 'B1a4 recommended 0, qualifying planned 520, residual 0');
+eq(B.parity.production_would_write, false, 'B1a5 so production would write nothing');
 eq(wB.dbWrites(), 0, 'B1b having written nothing');
 eq([B.db_writes, B.writer_calls, B.submit_calls, B.route_save_calls, B.writer_constructed],
   [0, 0, 0, 0, false], 'B1c and reporting the five zeroes §4 asks for');
@@ -437,6 +531,8 @@ var B2 = wB2.run('RUN_R6R7_CONTROLLED_AI_PLAN_PREFLIGHT').res;
 ok(B2.expected_ai_identities[0].id_the_writer_would_mint !== A_HEADER,
   'B6 an AI group with Route A\'s EXACT route still resolves to a different id — the ordinal is the difference');
 eq(failed(B2), [], 'B6a and the preflight still passes');
+ok(B2.verdict === 'READY_NO_ACTION' || B2.verdict === 'CONTROLLED_AI_PLAN_READY',
+  'B6a1 with a success verdict either way');
 
 // The reconciliation gap, disclosed rather than smoothed over.
 eq(B.expected_remaining_or_excess.server_side_reconciliation, 'NONE for these rows.',
@@ -456,7 +552,9 @@ var B_ZERO = new World({ gap: { d18_gap_qty: 0, d18_suggested_qty: 0, d30_gap_qt
   proposed: [] }).run('RUN_R6R7_CONTROLLED_AI_PLAN_PREFLIGHT').res;
 eq(B_ZERO.zero_recommendation_classification.kind, 'CORRECT_NO_ACTION',
   'B8a every window a stored finite 0 IS a correct no-action');
-eq(B_ZERO.verdict, 'CONTROLLED_AI_PLAN_READY', 'B8b which is READY, not a failure');
+eq(B_ZERO.verdict, 'READY_NO_ACTION', 'B8b which is a READY, not a failure');
+eq(B_ZERO.production_path.reason, 'VALID_ZERO_RECOMMENDATION',
+  'B8b1 and the reason is the valid zero itself, not the manual plan');
 eq(B_ZERO.expected_after_counts.headers, 2, 'B8c expecting no new header at all');
 ok(/NO_ACTION must produce no empty header/.test(B_ZERO.expected_after_counts.note),
   'B8d and saying that no empty shell may be created to represent it');
@@ -830,6 +928,263 @@ ok(RO.ROUND_TOKENS.indexOf('fc1be3r4a2r1r6r7') === -1,
   + ' download that carries nothing new');
 
 // ================================================================================================================
+section('H — §B/§C/§E the production state contract and the residual rule');
+// ================================================================================================================
+// Everything below calls 61_'s OWN functions, loaded into the world beside the census. A second copy of the
+// rules in this file would agree with itself and prove nothing about what production does.
+function P61(over) {
+  var w = new World(over || {});
+  var cyc = vm.runInContext('gapCalcResolveContext_().planningCycle', w.ctx);
+  var scope = { company: 'ResUS', country: 'US', marketplace: 'Amazon', planningCycle: cyc };
+  var js = JSON.stringify(scope);
+  var can = vm.runInContext('weeklyAiPlanCanonicalDemand_(SpreadsheetApp.openById("x"), ' + js + ', null)', w.ctx);
+  vm.runInContext('var __scope = ' + js + '; var __can = ' + JSON.stringify(can) + ';', w.ctx);
+  var out = vm.runInContext('(function () {'
+    + ' var t = weeklyAiPlanTargetScopes_(__scope, __scope.marketplace);'
+    + ' var rs = weeklyAiPlanRecommendationState_(__can, t);'
+    + ' var pl = weeklyAiPlanQualifyingPlannedQty_(SpreadsheetApp.openById("x"), __scope);'
+    + ' var d = weeklyAiPlanNoActionDecision_(rs, pl);'
+    + ' return { canonical_ok: __can.ok, target: t, state: rs, planned: pl, decision: d,'
+    + '   response: d.noAction ? weeklyAiPlanNoActionResponse_(d, { planning_cycle: __scope.planningCycle,'
+    + '     scope: __scope, site_count: 0 }) : null }; })()', w.ctx);
+  out.__world = w;
+  return out;
+}
+
+// ---- H1. READY + all-zero -> AI_PLAN_NO_ACTION, zero writes --------------------------------------------
+var H1 = P61({ gap: { d18_gap_qty: 0, d18_suggested_qty: 0, d30_gap_qty: 0, d30_suggested_qty: 0 } });
+eq(H1.state.state, 'VALID_ZERO_RECOMMENDATION', 'H1  READY with every window a stored finite 0 is a VALID ZERO');
+eq(H1.decision.noAction, true, 'H1a which is a no-action');
+eq(H1.decision.reason, 'VALID_ZERO_RECOMMENDATION', 'H1b for that reason, not because of the manual plan');
+eq(H1.response.success, true, 'H1c the production response is a typed SUCCESS');
+eq(H1.response.data.outcome, 'AI_PLAN_NO_ACTION', 'H1d carrying the formal outcome name');
+eq(H1.response.data.code, 'NO_REPLENISHMENT_REQUIRED', 'H1e and the existing equivalent code');
+eq([H1.response.data.recommended_qty, H1.response.data.residual_qty], [0, 0], 'H1f recommended 0, residual 0');
+eq([H1.response.data.created_headers, H1.response.data.updated_headers, H1.response.data.created_lines,
+    H1.response.data.updated_lines, H1.response.data.cancelled_headers, H1.response.data.cancelled_lines],
+  [0, 0, 0, 0, 0, 0], 'H1g every mutation counter explicitly zero');
+eq([H1.response.data.db_writes, H1.response.data.writer_reached, H1.response.data.route_count],
+  [0, false, 0], 'H1h zero writes, the writer not reached, no route');
+eq(H1.response.data.routes, [], 'H1i and no empty route was created to represent nothing');
+// The page's existing zero-result classifier must still recognise it, or a correct finish is presented as
+// a generic failure — which is the whole defect in a new place.
+eq([H1.response.data.zero_result, H1.response.data.job_status, H1.response.data.status],
+  [true, 'NO_DEMAND', 'COMPLETED'], 'H1j and the three keys the shipped page classifies a zero result from');
+ok(/zero_result === true|job_status \|\| ''\) === 'NO_DEMAND'/.test(PAGE)
+  || /d.zero_result === true/.test(PAGE), 'H1k which the page really does read');
+ok(H1.__world.dbWrites() === 0, 'H1l and nothing was written to reach any of it');
+
+// ---- H2. PENDING / NONE / missing / stale -> STOP, never a zero ----------------------------------------
+var H2a = P61({ gap: { calculation_status: 'BLOCKED', note: 'RECOMMENDATION_LINE_NOT_FOUND',
+  d18_suggested_qty: '', d30_suggested_qty: '', d45_suggested_qty: '', d90_suggested_qty: '' } });
+eq(H2a.state.state, 'MISSING_RECOMMENDATION', 'H2  a BLOCKED row is MISSING, never a zero');
+eq(H2a.decision.noAction, false, 'H2a and never a no-action');
+eq(H2a.decision.reason, 'MISSING_RECOMMENDATION', 'H2b reported as such');
+eq(H2a.state.per_scope, [], 'H2c a date with nothing READY on it is refused before any scope is read,');
+ok((H2a.state.missing_reasons[0] || {}).reason === 'CANONICAL_DEMAND_UNAVAILABLE',
+  'H2c1 and the reason names the snapshot rather than the scope');
+// The per-scope classifier itself, on a date the freshness authority accepts because ANOTHER row on it is
+// READY. This is the shape where one SKU is blocked and the rest of the run is fine.
+var H2aa = P61({ gap: { calculation_status: 'BLOCKED', note: 'RECOMMENDATION_LINE_NOT_FOUND',
+    d18_suggested_qty: '', d30_suggested_qty: '', d45_suggested_qty: '', d90_suggested_qty: '' },
+  extraGap: [{ sku: 'OTHER-SKU', d18_suggested_qty: 0, d30_suggested_qty: 0, d45_suggested_qty: 0,
+    d90_suggested_qty: 0 }] });
+eq(H2aa.canonical_ok, true, 'H2c2 one READY row makes the date usable,');
+eq(H2aa.state.state, 'MISSING_RECOMMENDATION', 'H2c3 and THIS key is still MISSING,');
+ok(/^NOT_READY:/.test(H2aa.state.per_scope[0].reason), 'H2c4 naming the status it found');
+eq(H2aa.decision.noAction, false, 'H2c5 so one blocked SKU is never answered as a no-action');
+var H2b = P61({ gap: { calculation_status: 'READY', d90_suggested_qty: '' } });
+eq(H2b.state.state, 'MISSING_RECOMMENDATION', 'H2d a READY row with a BLANK window is still MISSING');
+eq(H2b.state.per_scope[0].reason, 'WINDOW_VALUE_MISSING:D90', 'H2e naming the exact window');
+eq(H2b.state.per_scope[0].windows.D90, null, 'H2f whose value stayed null and was never coerced to 0');
+var H2c = P61({ dropGap: true });
+eq(H2c.state.state, 'MISSING_RECOMMENDATION', 'H2g an EMPTY table is MISSING');
+eq(H2c.decision.noAction, false, 'H2g1 and never a no-action');
+// THIS key absent while the snapshot itself is usable — the shape where a SKU has simply not been
+// materialized, which is exactly what must not be read as 'it needs nothing'.
+var H2cc = P61({ dropGap: true, extraGap: [{ sku: 'OTHER-SKU', d18_suggested_qty: 0, d30_suggested_qty: 0,
+  d45_suggested_qty: 0, d90_suggested_qty: 0 }] });
+eq(H2cc.canonical_ok, true, 'H2h the snapshot is usable,');
+eq(H2cc.state.per_scope[0].reason, 'NO_ROW_AT_THE_ACCEPTED_DATE', 'H2h1 and the missing key is named');
+eq(H2cc.decision.noAction, false, 'H2h2 a SKU nobody materialized is not a SKU that needs nothing');
+var H2d = P61({ gap: { calculation_date: GAP_YESTERDAY } });
+eq(H2d.state.state, 'MISSING_RECOMMENDATION', 'H2i a STALE snapshot is MISSING, not a zero');
+eq(H2d.decision.noAction, false, 'H2i1 and never a no-action');
+var H2e = P61({ extraGap: [{ d18_suggested_qty: 5 }] });
+eq(H2e.state.state, 'MISSING_RECOMMENDATION', 'H2j and a duplicate row for one key settles nothing');
+
+// ---- H3. nonzero recommendation, manual < recommendation -> only the residual --------------------------
+var H3 = P61({ gap: { d18_gap_qty: 900, d18_suggested_qty: 900, d30_suggested_qty: 900,
+  d45_suggested_qty: 900, d90_gap_qty: 900, d90_suggested_qty: 900 } });
+eq(H3.state.state, 'NONZERO_RECOMMENDATION', 'H3  900 recommended against 520 planned is NONZERO');
+eq(H3.decision.noAction, false, 'H3a so it is NOT a no-action');
+eq(H3.decision.reason, 'RESIDUAL_REMAINS', 'H3b the residual remains');
+eq([H3.decision.recommended_qty, H3.decision.qualifying_planned_qty, H3.decision.residual_qty],
+  [900, 520, 380], 'H3c and it is 900 - 520 = 380, not 900');
+// The rule itself, exercised as the pure function production uses.
+var resid = function (r, p) { return vm.runInContext('weeklyAiPlanResidualQty_(' + JSON.stringify(r) + ', '
+  + JSON.stringify(p) + ')', H3.__world.ctx); };
+eq(resid(900, 520), 380, 'H3d residual(900, 520) = 380');
+eq(resid(520, 520), 0, 'H3e residual(520, 520) = 0');
+eq(resid(300, 520), 0, 'H3f residual(300, 520) = 0, CLAMPED — never negative');
+eq(resid(900, null), 900, 'H3g nothing planned means the whole recommendation is residual');
+eq(resid(null, 520), null, 'H3h and a MISSING recommendation stays null, never 0');
+eq(resid('', 520), null, 'H3i as does a blank');
+
+// ---- H4. manual = recommendation -> NO_ACTION ----------------------------------------------------------
+var H4 = P61({ gap: { d18_gap_qty: 520, d18_suggested_qty: 520, d30_suggested_qty: 520,
+  d45_suggested_qty: 520, d90_gap_qty: 520, d90_suggested_qty: 520 } });
+eq(H4.decision.noAction, true, 'H4  an exact match is a no-action');
+eq(H4.decision.reason, 'FULLY_COVERED_BY_ACTIVE_PLAN', 'H4a covered by the active plan, not a zero need');
+eq(H4.decision.residual_qty, 0, 'H4b residual 0');
+eq(H4.response.data.outcome, 'AI_PLAN_NO_ACTION', 'H4c and the same typed success');
+ok(/already covered by the active Execution Plan/.test(H4.response.data.message),
+  'H4d whose message says WHY, because a bare zero would read as "nothing is needed"');
+
+// ---- H5. manual > recommendation -> NO_ACTION, and NOTHING is reduced ----------------------------------
+var H5 = P61({ gap: { d18_gap_qty: 300, d18_suggested_qty: 300, d30_suggested_qty: 300,
+  d45_suggested_qty: 300, d90_gap_qty: 300, d90_suggested_qty: 300 } });
+eq(H5.decision.noAction, true, 'H5  an over-planned scope is a no-action');
+eq(H5.decision.residual_qty, 0, 'H5a residual 0, clamped rather than negative');
+eq(H5.decision.per_scope[0].over_planned_qty, 220, 'H5b and the excess is REPORTED as its own number');
+eq([H5.response.data.cancelled_headers, H5.response.data.cancelled_lines], [0, 0],
+  'H5c nothing is cancelled to bring the plan back down');
+eq(H5.response.data.updated_headers, 0, 'H5d and nothing is reduced');
+eq(H5.__world.dbWrites(), 0, 'H5e the manual routes are untouched, measured on the sheet');
+
+// ---- H6. scope mismatch rows do not enter the planned total -------------------------------------------
+function planned(over) { return P61(over).planned; }
+var H6base = planned({});
+eq(H6base.byKey['ResUS|US|Amazon|CO1100-R'], 520, 'H6  the two manual routes total 520');
+eq(planned({ extraHeaders: [{ allocation_draft_id: 'SADH-X1', company: 'OtherCo', marketplace: 'Amazon' }],
+  extraLines: [{ allocation_draft_line_id: 'SADL-X1', allocation_draft_id: 'SADH-X1', planned_qty: '999' }]
+}).byKey['ResUS|US|Amazon|CO1100-R'], 520, 'H6a another COMPANY does not enter it');
+eq(planned({ extraHeaders: [{ allocation_draft_id: 'SADH-X2', marketplace: 'Walmart' }],
+  extraLines: [{ allocation_draft_line_id: 'SADL-X2', allocation_draft_id: 'SADH-X2', planned_qty: '999' }]
+}).byKey['ResUS|US|Amazon|CO1100-R'], 520, 'H6b nor another MARKETPLACE');
+eq(planned({ extraHeaders: [{ allocation_draft_id: 'SADH-X3' }],
+  extraLines: [{ allocation_draft_line_id: 'SADL-X3', allocation_draft_id: 'SADH-X3', sku: 'OTHER-SKU', planned_qty: '999' }]
+}).byKey['ResUS|US|Amazon|CO1100-R'], 520, 'H6c nor another SKU');
+eq(planned({ extraHeaders: [{ allocation_draft_id: 'SADH-X4', status: 'cancelled' }],
+  extraLines: [{ allocation_draft_line_id: 'SADL-X4', allocation_draft_id: 'SADH-X4', planned_qty: '999' }]
+}).byKey['ResUS|US|Amazon|CO1100-R'], 520, 'H6d nor a CANCELLED header');
+eq(planned({ extraHeaders: [{ allocation_draft_id: 'SADH-X5', status: 'submitted' }],
+  extraLines: [{ allocation_draft_line_id: 'SADL-X5', allocation_draft_id: 'SADH-X5', planned_qty: '999' }]
+}).byKey['ResUS|US|Amazon|CO1100-R'], 520, 'H6e nor a SUBMITTED one');
+eq(planned({ extraHeaders: [{ allocation_draft_id: 'SADH-X6' }],
+  extraLines: [{ allocation_draft_line_id: 'SADL-X6', allocation_draft_id: 'SADH-X6', planned_qty: '999', line_status: 'expired' }]
+}).byKey['ResUS|US|Amazon|CO1100-R'], 520, 'H6f nor an EXPIRED line under a live header');
+// And an ACTIVE row for this exact scope DOES enter it, so the filter is a distinction and not a wall.
+eq(planned({ extraHeaders: [{ allocation_draft_id: 'SADH-X7' }],
+  extraLines: [{ allocation_draft_line_id: 'SADL-X7', allocation_draft_id: 'SADH-X7', planned_qty: '80' }]
+}).byKey['ResUS|US|Amazon|CO1100-R'], 600, 'H6g while a third ACTIVE route for this scope does');
+
+// AN AI DRAFT THIS RUN WOULD SUPERSEDE IS NOT AN EXISTING COMMITMENT.
+//
+// Found by the R4 carrier-authority suite, which seeds a previous run's own draft covering the whole
+// recommendation: counting it netted the residual to zero and produced no route — and would have done so on
+// every replay, for ever, because a generation would net itself against its own last output.
+var H6ai = planned({ extraHeaders: [{ allocation_draft_id: 'SADH-AI1', generation_type: 'system_generated',
+    generation_run_id: 'AIRUN-1' }],
+  extraLines: [{ allocation_draft_line_id: 'SADL-AI1', allocation_draft_id: 'SADH-AI1', planned_qty: '900' }] });
+eq(H6ai.byKey['ResUS|US|Amazon|CO1100-R'], 520,
+  'H6h an AI draft this run would supersede is NOT counted as already planned');
+eq(H6ai.excluded.ai_generated_header, 1, 'H6h1 and its exclusion is counted, not silent');
+// A blank generation_type with a run id is still AI — the classifier's second rule, and the shape older
+// rows actually have.
+eq(planned({ extraHeaders: [{ allocation_draft_id: 'SADH-AI2', generation_type: '', generation_run_id: 'AIRUN-2' }],
+  extraLines: [{ allocation_draft_line_id: 'SADL-AI2', allocation_draft_id: 'SADH-AI2', planned_qty: '900' }]
+}).byKey['ResUS|US|Amazon|CO1100-R'], 520, 'H6i as is a bare run id with no generation_type');
+// And the provenance question has ONE owner.
+eq(H6base.provenance_authority, 'aiplIsAiGenerated_ (69_)',
+  'H6j provenance is asked of 69_\'s classifier, not re-derived in 61_');
+// THE REGENERATION CASE, end to end: a scope whose only active plan is the previous run's own output must
+// still produce a residual equal to the whole recommendation.
+var H6re = P61({ gap: { d18_gap_qty: 900, d18_suggested_qty: 900, d30_suggested_qty: 900,
+    d45_suggested_qty: 900, d90_gap_qty: 900, d90_suggested_qty: 900 },
+  dropA: true, dropB: true,
+  extraHeaders: [{ allocation_draft_id: 'SADH-AI3', generation_type: 'system_generated',
+    generation_run_id: 'AIRUN-3' }],
+  extraLines: [{ allocation_draft_line_id: 'SADL-AI3', allocation_draft_id: 'SADH-AI3', planned_qty: '900' }] });
+eq(H6re.decision.qualifying_planned_qty, 0, 'H6k a run\'s own previous draft counts for nothing,');
+eq(H6re.decision.residual_qty, 900, 'H6l so a replay can still regenerate the whole recommendation');
+eq(H6re.decision.noAction, false, 'H6m and does not answer NO_ACTION against itself');
+
+// ---- H7. the residual netting is idempotent -------------------------------------------------------------
+var H7w = new World();
+var H7 = vm.runInContext('(function () {'
+  + ' var sites = [{ marketplace: "Amazon", sku: "CO1100-R", cumulativeGapByWindow: { D18: 900, D90: 900 } }];'
+  + ' var pk = { "ResUS|US|Amazon|CO1100-R": 520 };'
+  + ' var a = weeklyAiPlanNetSitesByResidual_(sites, pk, { company: "ResUS", country: "US" });'
+  + ' var first = JSON.parse(JSON.stringify(sites[0].cumulativeGapByWindow));'
+  + ' var b = weeklyAiPlanNetSitesByResidual_(sites, {}, { company: "ResUS", country: "US" });'
+  + ' return { first: first, second: sites[0].cumulativeGapByWindow, report: a, replay: b }; })()', H7w.ctx);
+eq(H7.first, { D18: 380, D90: 380 }, 'H7  netting 900 by 520 leaves 380 at every cumulative checkpoint');
+eq(H7.second, { D18: 380, D90: 380 },
+  'H7a and a second pass with nothing planned does not restore the gross — the netting is not re-derived');
+eq(H7.report.netted_site_count, 1, 'H7b the netting is reported rather than silent');
+var H7z = vm.runInContext('(function () {'
+  + ' var sites = [{ marketplace: "Amazon", sku: "CO1100-R", cumulativeGapByWindow: { D18: 300, D90: 300 } }];'
+  + ' var r = weeklyAiPlanNetSitesByResidual_(sites, { "ResUS|US|Amazon|CO1100-R": 520 }, { company: "ResUS", country: "US" });'
+  + ' return { net: sites[0].cumulativeGapByWindow, covered: r.fully_covered_site_count }; })()', H7w.ctx);
+eq(H7z.net, { D18: 0, D90: 0 }, 'H7c an over-planned site nets to zero, never below it');
+eq(H7z.covered, 1, 'H7d and is counted as fully covered');
+var H7n = vm.runInContext('(function () {'
+  + ' var sites = [{ marketplace: "Amazon", sku: "CO1100-R", cumulativeGapByWindow: { D18: "", D90: 900 } }];'
+  + ' weeklyAiPlanNetSitesByResidual_(sites, { "ResUS|US|Amazon|CO1100-R": 520 }, { company: "ResUS", country: "US" });'
+  + ' return sites[0].cumulativeGapByWindow; })()', H7w.ctx);
+eq(H7n.D18, '', 'H7e an UNREADABLE gap is never netted into a number');
+
+// ---- H8. no zero-quantity route, and no empty shell ----------------------------------------------------
+eq(H1.response.data.groups, [], 'H8  a no-action produces no group');
+eq(H1.response.data.header_created, false, 'H8a no header');
+eq(H1.response.data.line_created, false, 'H8b and no line');
+
+// ---- H9. wrapper / production-handler parity ------------------------------------------------------------
+function parity(over) {
+  var w = new World(over || {});
+  var pre = w.run('RUN_R6R7_CONTROLLED_AI_PLAN_PREFLIGHT').res;
+  return { verdict: pre.verdict, outcome: pre.production_path.outcome, parity: pre.parity, pre: pre };
+}
+var H9a = parity({ gap: { d18_gap_qty: 0, d18_suggested_qty: 0, d30_gap_qty: 0, d30_suggested_qty: 0 } });
+eq([H9a.verdict, H9a.outcome], ['READY_NO_ACTION', 'AI_PLAN_NO_ACTION'],
+  'H9  a valid zero: the wrapper says READY_NO_ACTION because production says AI_PLAN_NO_ACTION');
+var H9b = parity({ gap: { calculation_status: 'BLOCKED', d18_suggested_qty: '', d30_suggested_qty: '',
+  d45_suggested_qty: '', d90_suggested_qty: '' } });
+eq([H9b.verdict, H9b.outcome], ['STOP', 'REFUSAL'],
+  'H9a a missing recommendation: the wrapper STOPS because production would refuse');
+var H9c = parity({ gap: { d18_gap_qty: 900, d18_suggested_qty: 900, d30_suggested_qty: 900,
+  d45_suggested_qty: 900, d90_gap_qty: 900, d90_suggested_qty: 900 } });
+eq(H9c.outcome, 'WOULD_GENERATE', 'H9b a residual: production would generate,');
+eq(H9c.parity.production_would_write, true, 'H9b1 and the wrapper says so');
+// THE DEFECT ITSELF: the wrapper must not out-rank the path it wraps. With production refusing, no amount
+// of this file's own checks passing may produce a success.
+ok(H9b.parity.wrapper_own_checks_passed === false || H9b.verdict === 'STOP',
+  'H9c and a wrapper success is unreachable while production would refuse');
+ok(/worse than no preflight/.test(H9a.parity.rule), 'H9d stated as the rule it is');
+
+// ---- H10. flag false -> production writes 0 ------------------------------------------------------------
+eq(H9a.pre.flag.value, false, 'H10 the flag is false in every world above');
+var H10w = new World();
+['RUN_R6R7_RECOMMENDATION_AUTHORITY_CENSUS', 'RUN_R6R7_CONTROLLED_AI_PLAN_PREFLIGHT',
+ 'RUN_R6R7_CONTROLLED_ACTIVATION_MANIFEST', 'RUN_R6R7_CONTROLLED_AI_PLAN_READBACK'].forEach(function (n) { H10w.run(n); });
+eq(H10w.dbWrites(), 0, 'H10a and every entry point together touched zero cells');
+eq(H1.__world.dbWrites() + H3.__world.dbWrites() + H4.__world.dbWrites() + H5.__world.dbWrites(), 0,
+  'H10b as did every production-authority evaluation above');
+
+// ---- the production handler's own gates, at the source -------------------------------------------------
+ok(/BEFORE THIS IS REPORTED AS A FAILURE, ASK WHETHER IT IS ONE/.test(G61),
+  'H11 the REQUESTED_SCOPE_EMPTY gate asks the canonical row first');
+ok(/weeklyAiPlanNoActionResponse_\(_na, \{/.test(G61), 'H11a and returns the typed success when it is one');
+ok(/the canonical recommendation could not be read as a valid zero/.test(G61),
+  'H11b while a genuine refusal now SAYS why it could not be read as a zero');
+ok(/`if \(!receivers.length\) return NO_RECEIVERS_BUILT`/.test(G61)
+  || /if \(!receivers.length\) return NO_RECEIVERS_BUILT/.test(G61),
+  'H12 and the older verdict\'s blind spot is named where it is worked around');
+ok(G61.indexOf('weeklyAiPlanK2NoAction_(h)') < G61.indexOf('weeklyAiPlanNoDemandVerdict_(h, mapped)'),
+  'H12a the canonical question is asked BEFORE the verdict that could not answer it');
+
+// ================================================================================================================
 section('N — mutants');
 // ================================================================================================================
 function W(src) { return new World({}, src); }
@@ -935,15 +1290,19 @@ mut('N13 the preflight passing while the flag is already on', function () {
   var m = swap(CENSUS, "P('flag_is_still_false_this_round', false, flagVal, flagVal === false);",
     "P('flag_is_still_false_this_round', false, flagVal, true);");
   var r = new World({ flag: true }, m).run('RUN_R6R7_CONTROLLED_AI_PLAN_PREFLIGHT').res;
-  return r.verdict === 'CONTROLLED_AI_PLAN_READY';
+  return r.verdict !== 'STOP';
 });
 mut('N14 the preflight ignoring a widened allowlist', function () {
   var m = swap(CENSUS, "P('allowlist_holds_exactly_this_one_scope', 1, allow ? allow.length : null, !!allow && allow.length === 1);",
     "P('allowlist_holds_exactly_this_one_scope', 1, allow ? allow.length : null, true);");
-  var r = new World({ allowlist: [{ company: 'ResUS', country: 'US', marketplace: 'Amazon', sku: 'CO1100-R' },
-    { company: 'ResUS', country: 'US', marketplace: 'Amazon', sku: 'OTHER-SKU' }] }, m)
-    .run('RUN_R6R7_CONTROLLED_AI_PLAN_PREFLIGHT').res;
-  return r.verdict === 'CONTROLLED_AI_PLAN_READY';
+  // The verdict cannot isolate this claim: a widened allowlist also gives the production path a scope with
+  // no canonical row, so the preflight stops for a second, independent reason. Asked where it is made.
+  var o = { allowlist: [{ company: 'ResUS', country: 'US', marketplace: 'Amazon', sku: 'CO1100-R' },
+    { company: 'ResUS', country: 'US', marketplace: 'Amazon', sku: 'OTHER-SKU' }] };
+  var clean = new World(o).run('RUN_R6R7_CONTROLLED_AI_PLAN_PREFLIGHT').res;
+  var r = new World(o, m).run('RUN_R6R7_CONTROLLED_AI_PLAN_PREFLIGHT').res;
+  return failed(clean).indexOf('allowlist_holds_exactly_this_one_scope') !== -1
+    && failed(r).indexOf('allowlist_holds_exactly_this_one_scope') === -1;
 });
 mut('N15 the activation manifest authorizing itself', function () {
   var src = extractFn(CENSUS, 'RUN_R6R7_CONTROLLED_ACTIVATION_MANIFEST');
@@ -985,6 +1344,111 @@ mut('N18 the duplicate-identity gate keyed on the row id rather than the group k
   return failed(clean).indexOf('no_duplicate_ai_identities') !== -1
     && failed(r).indexOf('no_duplicate_ai_identities') === -1;
 });
+// ---- R6-R7-R1: the production no-action authority. These mutate 61_ itself, because that is where the
+//      rules live; mutating a copy in the census would prove nothing about what a generation does. -------
+function W61(m, over) { return new World(over || {}, null, m); }
+function decide(m, over) {
+  var w = W61(m, over);
+  var cyc = vm.runInContext('gapCalcResolveContext_().planningCycle', w.ctx);
+  var js = JSON.stringify({ company: 'ResUS', country: 'US', marketplace: 'Amazon', planningCycle: cyc });
+  return vm.runInContext('(function () { var s = ' + js + ';'
+    + ' var c = weeklyAiPlanCanonicalDemand_(SpreadsheetApp.openById("x"), s, null);'
+    + ' var t = weeklyAiPlanTargetScopes_(s, s.marketplace);'
+    + ' var rs = weeklyAiPlanRecommendationState_(c, t);'
+    + ' var pl = weeklyAiPlanQualifyingPlannedQty_(SpreadsheetApp.openById("x"), s);'
+    + ' return { state: rs, planned: pl, decision: weeklyAiPlanNoActionDecision_(rs, pl) }; })()', w.ctx);
+}
+var ZERO_GAP = { d18_gap_qty: 0, d18_suggested_qty: 0, d30_gap_qty: 0, d30_suggested_qty: 0 };
+
+mut('N19 a blank window read as a stored zero, so an unmaterialized SKU answers NO_ACTION', function () {
+  var m = swap(GLOBAL_G61, 'function weeklyAiPlanQty_(v) {' + cr() + "  if (v === '' || v === null || v === undefined) return null;",
+    'function weeklyAiPlanQty_(v) {' + cr() + "  if (v === '' || v === null || v === undefined) return 0;");
+  var g = { calculation_status: 'READY', d18_suggested_qty: '', d30_suggested_qty: '',
+    d45_suggested_qty: '', d90_suggested_qty: '' };
+  var clean = decide(null, { gap: g, extraGap: [{ sku: 'OTHER-SKU', d90_suggested_qty: 0 }] });
+  var r = decide(m, { gap: g, extraGap: [{ sku: 'OTHER-SKU', d90_suggested_qty: 0 }] });
+  return clean.decision.noAction === false && r.decision.noAction === true;
+});
+mut('N20 a MISSING recommendation residualising to 0 instead of staying null', function () {
+  var m = swap(GLOBAL_G61, '  var r = weeklyAiPlanQty_(recommendedQty);' + cr() + '  if (r === null) return null;',
+    '  var r = weeklyAiPlanQty_(recommendedQty);' + cr() + '  if (r === null) return 0;');
+  var w = W61(m);
+  var clean = vm.runInContext('weeklyAiPlanResidualQty_(null, 520)', new World().ctx);
+  return clean === null && vm.runInContext('weeklyAiPlanResidualQty_(null, 520)', w.ctx) === 0;
+});
+mut('N21 the residual not clamped, so an over-planned scope reports a negative', function () {
+  var m = swap(GLOBAL_G61, '  var d = r - p;' + cr() + '  return d > 0 ? d : 0;',
+    '  var d = r - p;' + cr() + '  return d;');
+  var w = W61(m);
+  return vm.runInContext('weeklyAiPlanResidualQty_(300, 520)', new World().ctx) === 0
+    && vm.runInContext('weeklyAiPlanResidualQty_(300, 520)', w.ctx) === -220;
+});
+mut('N22 the qualifying plan keyed without the marketplace', function () {
+  var m = swap(GLOBAL_G61,
+    "      + weeklyAiPlanStr_(h.marketplace) + '|' + weeklyAiPlanStr_(l.sku);",
+    "      + 'Amazon' + '|' + weeklyAiPlanStr_(l.sku);");
+  var o = { extraHeaders: [{ allocation_draft_id: 'SADH-M1', marketplace: 'Walmart' }],
+    extraLines: [{ allocation_draft_line_id: 'SADL-M1', allocation_draft_id: 'SADH-M1', planned_qty: '999' }] };
+  var clean = decide(null, o), r = decide(m, o);
+  return clean.planned.byKey['ResUS|US|Amazon|CO1100-R'] === 520
+    && r.planned.byKey['ResUS|US|Amazon|CO1100-R'] === 1519;
+});
+mut('N22a the AI exclusion removed, so a run nets itself against its own previous draft', function () {
+  var m = swap(GLOBAL_G61, '    if (weeklyAiPlanIsAiRow_(h)) { out.excluded.ai_generated_header++; return; }',
+    '    if (false) { out.excluded.ai_generated_header++; return; }');
+  var o = { dropA: true, dropB: true,
+    gap: { d18_gap_qty: 900, d18_suggested_qty: 900, d30_suggested_qty: 900, d45_suggested_qty: 900,
+      d90_gap_qty: 900, d90_suggested_qty: 900 },
+    extraHeaders: [{ allocation_draft_id: 'SADH-AIM', generation_type: 'system_generated', generation_run_id: 'AIRUN-M' }],
+    extraLines: [{ allocation_draft_line_id: 'SADL-AIM', allocation_draft_id: 'SADH-AIM', planned_qty: '900' }] };
+  var clean = decide(null, o), r = decide(m, o);
+  return clean.decision.residual_qty === 900 && r.decision.residual_qty === 0;
+});
+mut('N23 a terminal header counted as an active plan', function () {
+  var m = swap(GLOBAL_G61, '    if (termH[st]) { out.excluded.terminal_header++; return; }',
+    '    if (false) { out.excluded.terminal_header++; return; }');
+  var o = { extraHeaders: [{ allocation_draft_id: 'SADH-M2', status: 'cancelled' }],
+    extraLines: [{ allocation_draft_line_id: 'SADL-M2', allocation_draft_id: 'SADH-M2', planned_qty: '999' }] };
+  var clean = decide(null, o), r = decide(m, o);
+  return clean.planned.byKey['ResUS|US|Amazon|CO1100-R'] === 520
+    && r.planned.byKey['ResUS|US|Amazon|CO1100-R'] === 1519;
+});
+mut('N24 a NOT_READY row classified as a valid zero', function () {
+  var m = swap(GLOBAL_G61, "    if (weeklyAiPlanStr_(row.calculation_status) !== 'READY') {", '    if (false) {');
+  var g = { calculation_status: 'BLOCKED', d18_suggested_qty: 0, d30_suggested_qty: 0,
+    d45_suggested_qty: 0, d90_suggested_qty: 0 };
+  var o = { gap: g, extraGap: [{ sku: 'OTHER-SKU', d90_suggested_qty: 0 }] };
+  var clean = decide(null, o), r = decide(m, o);
+  return clean.decision.noAction === false && r.decision.noAction === true;
+});
+mut('N25 a residual that remains still answered as a no-action', function () {
+  var m = swap(GLOBAL_G61, "  if (anyResidual) { out.reason = 'RESIDUAL_REMAINS'; return out; }",
+    "  if (false) { out.reason = 'RESIDUAL_REMAINS'; return out; }");
+  var g = { d18_gap_qty: 900, d18_suggested_qty: 900, d30_suggested_qty: 900, d45_suggested_qty: 900,
+    d90_gap_qty: 900, d90_suggested_qty: 900 };
+  var clean = decide(null, { gap: g }), r = decide(m, { gap: g });
+  return clean.decision.noAction === false && r.decision.noAction === true;
+});
+mut('N26 the K2 empty-scope gate skipping the canonical question', function () {
+  var m = swap(GLOBAL_G61, '      var _na = weeklyAiPlanK2NoAction_(harvest);' + cr() + '      if (_na.noAction) {',
+    '      var _na = weeklyAiPlanK2NoAction_(harvest);' + cr() + '      if (false) {');
+  // Source-level: the gate must not be reachable-only-on-paper. Both halves asserted so a renamed anchor
+  // cannot pass as a caught mutant.
+  return /if \(_na\.noAction\) \{/.test(GLOBAL_G61) && !/if \(_na\.noAction\) \{/.test(m)
+    && /weeklyAiPlanNoActionResponse_\(_na,/.test(GLOBAL_G61);
+});
+mut('N27 the wrapper naming a success while the production path refuses', function () {
+  var m = swap(CENSUS, "  } else if (pp.outcome === 'AI_PLAN_NO_ACTION') {", '  } else if (true) {');
+  var g = { calculation_status: 'BLOCKED', d18_suggested_qty: '', d30_suggested_qty: '',
+    d45_suggested_qty: '', d90_suggested_qty: '' };
+  var clean = new World({ gap: g }).run('RUN_R6R7_CONTROLLED_AI_PLAN_PREFLIGHT').res;
+  var r = new World({ gap: g }, m).run('RUN_R6R7_CONTROLLED_AI_PLAN_PREFLIGHT').res;
+  // The predicate is what stops it even with the branch mutated, and that is the point: the verdict is
+  // derived from the production answer in TWO places, so removing one is still caught.
+  return clean.verdict === 'STOP' && failed(r).indexOf('production_path_would_not_refuse') !== -1;
+});
+function cr() { return String.fromCharCode(13) + String.fromCharCode(10); }
+
 function withAiSrc(src, over) {
   var o = { extraHeaders: [Object.assign({ allocation_draft_id: AI_H, destination_marketplace: 'Amazon',
       recommended_shipping_method: 'sea_express', recommended_last_mile_delivery: 'truck',
