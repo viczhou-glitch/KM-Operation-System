@@ -400,6 +400,14 @@
             allocation_draft_id: s.allocation_draft_id || null,
             allocation_draft_line_ids: s.allocation_draft_line_ids || null,
             changed_fields: s.changed_fields || null,
+            // R6-R6-R4 §5 — what the request WAS, not only which rows it named. A write whose intent or
+            // expected version is unreported cannot be distinguished from one that would mint a twin, and
+            // that distinction is the whole audit. Explicitly null when the recorder did not supply it, so
+            // 'not told' never reads as 'no'.
+            intent: s.intent || null,
+            expected_draft_version: s.expected_draft_version || null,
+            has_create_idempotency_key: (typeof s.has_create_idempotency_key === 'boolean') ? s.has_create_idempotency_key : null,
+            mints_new_row: (typeof s.mints_new_row === 'boolean') ? s.mints_new_row : null,
             outcome: s.outcome || null };
         })
         .sort(function (a, b) { return a.dispatch_ms - b.dispatch_ms || a.seq - b.seq; });
@@ -520,6 +528,11 @@
             allocation_draft_id: sample.allocation_draft_id ? str(sample.allocation_draft_id) : null,
             allocation_draft_line_ids: Array.isArray(sample.allocation_draft_line_ids) ? sample.allocation_draft_line_ids.map(str) : null,
             changed_fields: Array.isArray(sample.changed_fields) ? sample.changed_fields.map(str) : null,
+            // R6-R6-R4 — an intent token, a version string and two booleans. Still no values, still no body.
+            intent: sample.intent ? str(sample.intent) : null,
+            expected_draft_version: sample.expected_draft_version != null ? str(sample.expected_draft_version) : null,
+            has_create_idempotency_key: (typeof sample.has_create_idempotency_key === 'boolean') ? sample.has_create_idempotency_key : null,
+            mints_new_row: (typeof sample.mints_new_row === 'boolean') ? sample.mints_new_row : null,
             outcome: sample.outcome ? str(sample.outcome) : null,
             external: true }, _extMarks));
         return true;

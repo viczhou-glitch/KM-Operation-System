@@ -67,7 +67,7 @@
 // §9 — THE CENSUS WAS REPORTING A BUILD IT NO LONGER WAS. Its behaviour changed in A2-R1-R1 (it learned to
 // read the harvest REFUSAL) and again in A2-R1-R2 (route intent + identity preview) while this literal stayed
 // at A2-R1, so a log could not be matched to the code that produced it. It moves with the file now.
-var TEMP_E3_CENSUS_BUILD_ = 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R6-R3';
+var TEMP_E3_CENSUS_BUILD_ = 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R6-R4';
 
 /** Read-only row reader. The Sheet object stays inside this function — the caller gets values, never a writer. */
 // R6-R3 §2 — the OPTIONAL third argument is a metrics sink. §2 requires the diagnostic to report how many
@@ -2669,6 +2669,12 @@ function RUN_R6R2_ROUTE_PROVENANCE() {
           draft_version: CENSUS_str_(vh.draft_version),
           updated_at: CENSUS_str_(vh.updated_at),
           line_updated_at: CENSUS_str_(vl.updated_at),
+          // R6-R6-R4 — WHO WROTE IT LAST. 16_ resolves `actor` as body.created_by || 'inventory-replenishment',
+          // so this column names the writer of the most recent change: the page, or a named diagnostic. It is the
+          // one field that distinguishes 'this row did not move' from 'this row moved back to the same value'.
+          // There is NO line-level equivalent — SHIPPING_ALLOCATION_DRAFT_LINES_HEADERS_ has created_at and
+          // updated_at and no updated_by — so a route has exactly one recorded actor, on its header.
+          updated_by: CENSUS_str_(vh.updated_by),
           save_target_status: tgt ? CENSUS_str_(tgt.status) : (tgtErr ? 'RESOLVER_ERROR' : 'RESOLVER_UNAVAILABLE'),
           save_target_allocation_draft_id: tgt ? CENSUS_str_(tgt.allocation_draft_id) : '',
           save_target_conflict_ids: (tgt && tgt.conflictIds) ? tgt.conflictIds : [],
@@ -4405,6 +4411,454 @@ function CENSUS_r6r6r3FinishBack_(out) {
   out.predicates.forEach(function (p) {
     if (!p.pass) CENSUS_log_('r6r6r3_readback_failed', p.predicate + ': expected '
       + JSON.stringify(p.expected) + ' observed ' + JSON.stringify(p.observed));
+  });
+  return out;
+}
+
+// ================================================================================================================
+// F1-7N-FC-1B-E3-R4-A2-R1-R6-R6-R4 — THE POST-REPAIR SINGLE-ROW SAVE, AND A BASELINE THAT IS ITS OWN.
+//
+// Three rounds changed what production holds, so the BEFORE this round compares against is NEW. R6-R6-R1's
+// freeze describes a plan where Route A had no last mile and Route B was at version 1; R6-R6-R3's constants
+// describe the moment Route B still held `parcel`. Both are correct records of moments that have passed, and
+// reusing either would be checking today's database against last week's.
+//
+// WHAT IS FROZEN HERE, AND ON WHAT EVIDENCE. Every field below is one of:
+//
+//   • CONFIRMED IN PRODUCTION — the R6-R6-R3 readback returned ROUTE_B_COMPENSATION_CONFIRMED with 30 of 30
+//     predicates passing, and those predicates compared Route A's six fields and Route B's business set
+//     against these exact literals. A field a production run compared and did not reject is evidence.
+//   • DERIVED FROM SHIPPED CODE — `updated_by`. 16_ resolves its actor as `body.created_by ||
+//     'inventory-replenishment'`; the Execution Plan sends no created_by at all (there is no `created_by` in
+//     inventory-replenishment.js), so the page's writes are stamped with the default, and R6-R6-R3's payload
+//     set created_by explicitly. Both values follow from source, and both are FALSIFIABLE: if production
+//     disagrees the readiness STOPs rather than shrugging.
+//   • NOT EVIDENCED — Route B's two post-repair instants. Nobody supplied them and this file will not invent
+//     them. They are named in `snapshot_gaps`, and what replaces the equality gate is stated below.
+//
+// HOW ROUTE B IS PROVEN NOT TO HAVE MOVED, WITHOUT ITS TIMESTAMP. Three independent facts, none of which
+// needs a value nobody has:
+//
+//   1. `draft_version` is still 3. The writer increments it on every UPDATE, so a write that landed on
+//      Route B could not leave it at 3.
+//   2. `updated_by` is still `r6r6r3-compensating-repair`. The Save writes as `inventory-replenishment`, so
+//      the repair being the last recorded actor means the Save was not.
+//   3. Route B's `updated_at` is STRICTLY EARLIER than Route A's post-Save `updated_at`. Both stamps come
+//      from the same clock through the same writer; a Save that touched both rows would stamp them together.
+//
+// That is stronger than the equality gate it replaces, because it survives not knowing the absolute value —
+// and it is stated here rather than buried, so nobody reads `snapshot_gaps` as 'unchecked'.
+//
+// THE TIMEOUT IS STILL OPEN, AND THIS ROUND DID NOT LOOK AT IT. Recorded here so a round that measured
+// something else cannot be read as having closed it:
+//
+//   • one REQUEST_TIMEOUT recurred after R6-R5;
+//   • several cold loads have succeeded since;
+//   • the most recent successful workspace sample is ~32.6s client / ~26.4s server;
+//   • classification: INTERMITTENT_TIMEOUT_OPEN_NON_BLOCKING.
+//
+// It is NOT eliminated. No timeout logic is touched by R6-R6-R4: a change there needs a reproducible
+// defect with its own timestamps and request ids, and this round produced none.
+// ================================================================================================================
+
+var R6R6R4_A_TARGET_ = { allocation_draft_id: 'SADH-K4-38523A90', allocation_draft_line_id: 'SADL-K2-92B8BAD2' };
+var R6R6R4_B_BYSTANDER_ = { allocation_draft_id: 'SADH-K4-A3872518', allocation_draft_line_id: 'SADL-K2-344FB2B2' };
+
+// The ONE authorized change of stage one, spelled so it cannot be read as a business decision.
+var R6R6R4_AUTHORIZED_ACTION_ = 'Route A last_mile_delivery truck -> parcel, through the ordinary Execution'
+  + ' Plan Save. This is an ISOLATION TEST, not a shipping decision: stage two restores it to truck.';
+var R6R6R4_A_AFTER_LAST_MILE_ = 'parcel';
+var R6R6R4_PAGE_ACTOR_ = 'inventory-replenishment';      // 16_ line 499: body.created_by || this
+var R6R6R4_REPAIR_ACTOR_ = 'r6r6r3-compensating-repair'; // what R6-R6-R3 sent as created_by
+
+// ---- ROUTE A. The only row the Save may touch. -----------------------------------------------------------------
+// Scope fields are lowercase where they were read from the K4 key (which lowercases every segment by
+// construction) and in the row's own spelling where they were read from the row. Every one of them is
+// compared case-insensitively, so both are correct and neither is a guess at stored casing.
+var R6R6R4_A_BEFORE_ = {
+  allocation_draft_id: 'SADH-K4-38523A90',
+  allocation_draft_line_id: 'SADL-K2-92B8BAD2',
+  company: 'resus', country: 'us', station_marketplace: 'amazon', sku: 'CO1100-R',
+  source_warehouse_id: 'wh-tw-cn-factory-youxin',
+  destination_kind: 'MARKETPLACE', destination_id: 'amazon', destination_marketplace: 'amazon',
+  quantity: 320,
+  shipping_method: 'sea_express',
+  last_mile_delivery: 'truck',
+  expected_arrival: '',
+  k4_group_key: '|resus|us|amazon|inventory_replenishment|wh-tw-cn-factory-youxin|marketplace|amazon|sea_express|truck|',
+  status: 'draft', line_status: '', generation_type: 'user_created',
+  ownership: 'MANUAL (no generation_run_id — composed by a person)',
+  draft_version: '2',
+  updated_at: 'Sun Sep 06 2026 08:27:53 GMT+0800 (Taiwan Standard Time)',
+  line_updated_at: 'Sun Sep 06 2026 08:27:53 GMT+0800 (Taiwan Standard Time)',
+  updated_by: 'inventory-replenishment'
+};
+// ---- ROUTE B. The bystander. Nothing about it is authorized to change, in either direction. -------------------
+var R6R6R4_B_BEFORE_ = {
+  allocation_draft_id: 'SADH-K4-A3872518',
+  allocation_draft_line_id: 'SADL-K2-344FB2B2',
+  company: 'ResUS', country: 'US', station_marketplace: 'Amazon', sku: 'CO1100-R',
+  source_warehouse_id: 'WH-TW-CN-FACTORY-YOUXIN',
+  destination_kind: 'WAREHOUSE', destination_id: 'WH-RESUS-US-3PL-AMZLGS', destination_marketplace: '',
+  quantity: 200,
+  shipping_method: 'air',
+  last_mile_delivery: '',
+  expected_arrival: '',
+  k4_group_key: '|resus|us|amazon|inventory_replenishment|wh-tw-cn-factory-youxin|warehouse|wh-resus-us-3pl-amzlgs|air||',
+  status: 'draft', line_status: '', generation_type: 'user_created',
+  ownership: 'MANUAL (no generation_run_id — composed by a person)',
+  draft_version: '3',
+  updated_by: 'r6r6r3-compensating-repair',
+  // NOT FROZEN, and named rather than omitted. See the header comment: the two instants the compensation
+  // stamped were never reported, and a literal here would be a fabrication wearing the shape of evidence.
+  updated_at: null,
+  line_updated_at: null
+};
+// The moment the compensation ran must be BEFORE whatever Route B now holds — that is the only thing the
+// missing instants can still be checked against, and it is checkable.
+var R6R6R4_COMPENSATION_FLOOR_ = 'Sun Sep 06 2026 08:28:04 GMT+0800 (Taiwan Standard Time)';
+
+// The set. A single-row Save must leave every one of these exactly where it found it.
+var R6R6R4_SET_BEFORE_ = { current_plan_total: 520, visible_route_rows: 2, header_count: 2, line_count: 2 };
+
+// Which fields are compared, and in which role. `identity` and `business` may never move on either row;
+// `audit` moves on the target and must not move on the bystander.
+var R6R6R4_IDENTITY_FIELDS_ = ['allocation_draft_id', 'allocation_draft_line_id', 'company', 'country',
+  'station_marketplace', 'sku', 'source_warehouse_id', 'destination_kind', 'destination_id',
+  'destination_marketplace', 'k4_group_key'];
+var R6R6R4_BUSINESS_FIELDS_ = ['quantity', 'shipping_method', 'status', 'line_status', 'generation_type',
+  'ownership', 'expected_arrival'];
+var R6R6R4_AUDIT_FIELDS_ = ['draft_version', 'updated_at', 'line_updated_at', 'updated_by'];
+// What the Save is allowed to move on ROUTE A, and nothing else. `k4_group_key` is derived, not stored.
+var R6R6R4_A_ALLOWED_TO_MOVE_ = ['last_mile_delivery', 'k4_group_key', 'draft_version', 'updated_at',
+  'line_updated_at', 'updated_by'];
+
+function CENSUS_r6r6r4Find_(rows, headerId, lineId) {
+  var hits = [];
+  for (var i = 0; i < (rows || []).length; i++) {
+    if (CENSUS_str_(rows[i].allocation_draft_id) === CENSUS_str_(headerId) &&
+        CENSUS_str_(rows[i].allocation_draft_line_id) === CENSUS_str_(lineId)) hits.push(rows[i]);
+  }
+  return hits;
+}
+// THE K4 SUBSTITUTION, DERIVED RATHER THAN TYPED. The last-mile segment is the second-to-last field of the
+// key, and the expected AFTER key is the frozen key with THAT segment replaced and nothing else touched. A
+// hard-coded 'parcel' key would pass even if some other dimension had moved with it, which is exactly the
+// class of change the round exists to detect.
+function CENSUS_r6r6r4K4Swap_(frozenKey, frozenLastMile, nextLastMile) {
+  var parts = CENSUS_str_(frozenKey).split('|');
+  if (parts.length < 3) return null;
+  var at = parts.length - 2;
+  if (CENSUS_str_(parts[at]).toLowerCase() !== CENSUS_str_(frozenLastMile).toLowerCase()) return null;
+  parts[at] = CENSUS_str_(nextLastMile);
+  return parts.join('|');
+}
+// Every frozen field of a record against the live row, through the ONE comparison core the whole family uses.
+// A field frozen as null is a GAP, reported by name — never silently equal, never silently unequal.
+function CENSUS_r6r6r4CmpAll_(out, prefix, frozen, live, fields, gaps) {
+  for (var i = 0; i < fields.length; i++) {
+    var k = fields[i];
+    if (frozen[k] === null || frozen[k] === undefined) {
+      if (gaps.indexOf(prefix + '.' + k) === -1) gaps.push(prefix + '.' + k);
+      continue;
+    }
+    var c = CENSUS_r6r6Cmp_(k, frozen[k], live ? live[k] : null);
+    CENSUS_r6r6r3P_(out, prefix + '_' + k + '_unchanged', c.frozen, live ? c.live : null, !!live && c.equal);
+  }
+}
+
+// ----------------------------------------------------------------------------------------------------------------
+// §3 — READINESS. Read-only. Run it immediately before the one authorized edit.
+// ----------------------------------------------------------------------------------------------------------------
+function RUN_R6R6R4_SINGLE_ROW_SAVE_READINESS() {
+  var out = {
+    census: 'RUN_R6R6R4_SINGLE_ROW_SAVE_READINESS',
+    build: TEMP_E3_CENSUS_BUILD_,
+    read_only: true, db_writes: 0, writer_constructed: false, writer_calls: 0,
+    submit_calls: 0, reservation_writes: 0, carrier_master_data_writes: 0,
+    target: R6R6R4_A_TARGET_, bystander: R6R6R4_B_BYSTANDER_,
+    authorized_action: R6R6R4_AUTHORIZED_ACTION_,
+    predicates: [], predicates_passed: 0, predicates_failed: 0,
+    snapshot_gaps: [],
+    derived_gates: [],
+    already_saved: false,
+    stage_two_authorized: false,
+    stage_two: 'parcel -> truck, version 3 -> 4, is DESIGNED and NOT AUTHORIZED this round. See'
+      + ' RUN_R6R6R4_RESTORE_STAGE_TWO_MANIFEST.',
+    frozen_snapshot_source: '',
+    verdict: 'STOP', stop_reason: ''
+  };
+  var res = RUN_R6R2_ROUTE_PROVENANCE();
+  if (res.error) {
+    CENSUS_r6r6r3P_(out, 'census_readable', 'the route census returns rows', 'error: ' + CENSUS_str_(res.error), false);
+    out.stop_reason = 'the census itself failed: ' + CENSUS_str_(res.error);
+    return CENSUS_r6r6r4Finish_(out);
+  }
+  out.db_writes = CENSUS_num_(res.db_writes) || 0;
+  out.writer_constructed = res.writer_constructed === true;
+  var rows = res.visible_route_rows || [];
+
+  // ---- ROUTE A, the target. Present exactly once, and every frozen field where it was left. -------------------
+  var aHits = CENSUS_r6r6r4Find_(rows, R6R6R4_A_TARGET_.allocation_draft_id, R6R6R4_A_TARGET_.allocation_draft_line_id);
+  CENSUS_r6r6r3P_(out, 'route_a_present_exactly_once', 1, aHits.length, aHits.length === 1);
+  var a = aHits.length === 1 ? aHits[0] : null;
+  CENSUS_r6r6r4CmpAll_(out, 'route_a', R6R6R4_A_BEFORE_, a,
+    R6R6R4_IDENTITY_FIELDS_.concat(R6R6R4_BUSINESS_FIELDS_).concat(['last_mile_delivery'])
+      .concat(R6R6R4_AUDIT_FIELDS_), out.snapshot_gaps);
+
+  // NOT ALREADY DONE. A row that already reads `parcel` at version 3 is not 'not ready' — it is a Save that
+  // has already happened, and an operator who cannot tell those apart performs the edit twice.
+  out.already_saved = !!a && CENSUS_str_(a.last_mile_delivery).toLowerCase() === R6R6R4_A_AFTER_LAST_MILE_
+    && CENSUS_str_(a.draft_version) === '3';
+  CENSUS_r6r6r3P_(out, 'route_a_save_has_not_already_happened', 'last mile truck at version 2',
+    a ? (CENSUS_str_(a.last_mile_delivery) + ' at version ' + CENSUS_str_(a.draft_version)) : null,
+    !!a && !out.already_saved);
+
+  // ---- ROUTE B, the bystander. Every frozen field, plus the two derived instants. ----------------------------
+  var bHits = CENSUS_r6r6r4Find_(rows, R6R6R4_B_BYSTANDER_.allocation_draft_id, R6R6R4_B_BYSTANDER_.allocation_draft_line_id);
+  CENSUS_r6r6r3P_(out, 'route_b_present_exactly_once', 1, bHits.length, bHits.length === 1);
+  var b = bHits.length === 1 ? bHits[0] : null;
+  CENSUS_r6r6r4CmpAll_(out, 'route_b', R6R6R4_B_BEFORE_, b,
+    R6R6R4_IDENTITY_FIELDS_.concat(R6R6R4_BUSINESS_FIELDS_).concat(['last_mile_delivery'])
+      .concat(R6R6R4_AUDIT_FIELDS_), out.snapshot_gaps);
+
+  // THE TWO GAPS, GATED BY DERIVATION. Later than the compensation, and agreeing with each other because one
+  // transaction stamped both. Named in `derived_gates` so the difference from an equality gate is visible.
+  var floor = CENSUS_r6r6r3TsMs_(R6R6R4_COMPENSATION_FLOOR_);
+  ['updated_at', 'line_updated_at'].forEach(function (fld) {
+    var now = b ? CENSUS_r6r6r3TsMs_(b[fld]) : null;
+    out.derived_gates.push('route_b_' + fld + '_is_after_the_compensation_write');
+    CENSUS_r6r6r3P_(out, 'route_b_' + fld + '_is_after_the_compensation_write',
+      'later than ' + R6R6R4_COMPENSATION_FLOOR_, b ? CENSUS_str_(b[fld]) : null,
+      now !== null && floor !== null && now > floor);
+  });
+  var bh = b ? CENSUS_r6r6r3TsMs_(b.updated_at) : null, bl = b ? CENSUS_r6r6r3TsMs_(b.line_updated_at) : null;
+  out.derived_gates.push('route_b_header_and_line_instants_agree');
+  CENSUS_r6r6r3P_(out, 'route_b_header_and_line_instants_agree', 'the same instant, from one transaction',
+    b ? (CENSUS_str_(b.updated_at) + ' / ' + CENSUS_str_(b.line_updated_at)) : null,
+    bh !== null && bl !== null && bh === bl);
+
+  // ---- THE SET. A single-row Save changes the shape of nothing. -----------------------------------------------
+  var total = CENSUS_num_(res.census_current_plan_total);
+  CENSUS_r6r6r3P_(out, 'current_plan_total_is_520', R6R6R4_SET_BEFORE_.current_plan_total, total,
+    total === R6R6R4_SET_BEFORE_.current_plan_total);
+  CENSUS_r6r6r3P_(out, 'visible_route_rows_is_2', R6R6R4_SET_BEFORE_.visible_route_rows, rows.length,
+    rows.length === R6R6R4_SET_BEFORE_.visible_route_rows);
+  var hCount = (res.sku_contributing_header_ids || []).length;
+  var lCount = (res.sku_contributing_line_ids || []).length;
+  CENSUS_r6r6r3P_(out, 'header_count_is_2', R6R6R4_SET_BEFORE_.header_count, hCount, hCount === R6R6R4_SET_BEFORE_.header_count);
+  CENSUS_r6r6r3P_(out, 'line_count_is_2', R6R6R4_SET_BEFORE_.line_count, lCount, lCount === R6R6R4_SET_BEFORE_.line_count);
+  var amb = (res.ambiguous_save_targets || []).map(function (t) { return CENSUS_str_(t.visible_row_key); });
+  CENSUS_r6r6r3P_(out, 'no_ambiguous_save_target', [], amb, amb.length === 0);
+
+  // THE WRITE PATH'S OWN ANSWER about where a Save would land. REUSE of Route A's own header is the only
+  // acceptable one: CREATE would mint a twin, and BLOCKED_CONFLICT would mean two headers share the identity.
+  CENSUS_r6r6r3P_(out, 'route_a_save_target_is_its_own_header_reuse', 'REUSE ' + R6R6R4_A_TARGET_.allocation_draft_id,
+    a ? (CENSUS_str_(a.save_target_status) + ' ' + CENSUS_str_(a.save_target_allocation_draft_id)) : null,
+    !!a && a.save_would_update_this_header === true && a.save_would_mint_new_header === false);
+  CENSUS_r6r6r3P_(out, 'route_b_save_target_would_not_be_minted', false,
+    b ? b.save_would_mint_new_header : null, !!b && b.save_would_mint_new_header === false);
+
+  // ---- AND THIS READ WROTE NOTHING. ---------------------------------------------------------------------------
+  CENSUS_r6r6r3P_(out, 'writer_not_constructed', false, out.writer_constructed, out.writer_constructed === false);
+  CENSUS_r6r6r3P_(out, 'db_writes_is_zero', 0, out.db_writes, out.db_writes === 0);
+  CENSUS_r6r6r3P_(out, 'writer_calls_is_zero', 0, out.writer_calls, out.writer_calls === 0);
+
+  // The paste-ready upgrade. Running this once more after pasting turns the two derived gates into equality
+  // gates; it is offered rather than required, because the three facts above already prove non-movement.
+  out.frozen_snapshot_source = b
+    ? ('  updated_at: ' + JSON.stringify(CENSUS_str_(b.updated_at)) + ','
+       + ' line_updated_at: ' + JSON.stringify(CENSUS_str_(b.line_updated_at)))
+    : '';
+
+  if (out.predicates_failed === 0) {
+    out.verdict = 'SINGLE_ROW_SAVE_READY';
+  } else {
+    out.stop_reason = out.predicates_failed + ' predicate(s) failed: '
+      + out.predicates.filter(function (p) { return !p.pass; }).map(function (p) { return p.predicate; }).join(', ')
+      + (out.already_saved ? '. NOTE: Route A is ALREADY at parcel/version 3 — the authorized edit has already'
+        + ' been performed. Do NOT repeat it; run RUN_R6R6R4_SINGLE_ROW_SAVE_READBACK instead.' : '');
+  }
+  return CENSUS_r6r6r4Finish_(out);
+}
+
+// ----------------------------------------------------------------------------------------------------------------
+// §6 — READBACK. Read-only. Run it after the one authorized edit, and after any unclear acknowledgement.
+// ----------------------------------------------------------------------------------------------------------------
+function RUN_R6R6R4_SINGLE_ROW_SAVE_READBACK() {
+  var out = {
+    census: 'RUN_R6R6R4_SINGLE_ROW_SAVE_READBACK',
+    build: TEMP_E3_CENSUS_BUILD_,
+    read_only: true, db_writes: 0, writer_constructed: false, writer_calls: 0,
+    submit_calls: 0, reservation_writes: 0, carrier_master_data_writes: 0,
+    predicates: [], predicates_passed: 0, predicates_failed: 0,
+    snapshot_gaps: [], derived_gates: [],
+    k4_expected_after: null, k4_actual_after: null,
+    stage_two_authorized: false,
+    ui_note: 'The Execution Plan may DISPLAY a last mile on either route because a one-profile lane fills the'
+      + ' cell for display. A displayed value is not a stored one; these predicates read the database.',
+    verdict: 'STOP', stop_reason: ''
+  };
+  var res = RUN_R6R2_ROUTE_PROVENANCE();
+  if (res.error) {
+    CENSUS_r6r6r3P_(out, 'census_readable', 'the route census returns rows', 'error: ' + CENSUS_str_(res.error), false);
+    out.stop_reason = 'the census itself failed: ' + CENSUS_str_(res.error);
+    return CENSUS_r6r6r4Finish_(out);
+  }
+  out.db_writes = CENSUS_num_(res.db_writes) || 0;
+  out.writer_constructed = res.writer_constructed === true;
+  var rows = res.visible_route_rows || [];
+
+  var aHits = CENSUS_r6r6r4Find_(rows, R6R6R4_A_TARGET_.allocation_draft_id, R6R6R4_A_TARGET_.allocation_draft_line_id);
+  var bHits = CENSUS_r6r6r4Find_(rows, R6R6R4_B_BYSTANDER_.allocation_draft_id, R6R6R4_B_BYSTANDER_.allocation_draft_line_id);
+  CENSUS_r6r6r3P_(out, 'route_a_still_present_exactly_once', 1, aHits.length, aHits.length === 1);
+  CENSUS_r6r6r3P_(out, 'route_b_still_present_exactly_once', 1, bHits.length, bHits.length === 1);
+  var a = aHits.length === 1 ? aHits[0] : null;
+  var b = bHits.length === 1 ? bHits[0] : null;
+
+  // ---- ROUTE A: THE INTENDED CHANGE, AND ONLY IT. --------------------------------------------------------------
+  CENSUS_r6r6r3P_(out, 'route_a_last_mile_is_parcel', R6R6R4_A_AFTER_LAST_MILE_,
+    a ? CENSUS_str_(a.last_mile_delivery) : null,
+    !!a && CENSUS_str_(a.last_mile_delivery).toLowerCase() === R6R6R4_A_AFTER_LAST_MILE_);
+  // EXACTLY ONE STEP. No step means the write never landed; two means something wrote twice.
+  CENSUS_r6r6r3P_(out, 'route_a_draft_version_advanced_by_exactly_one', '3',
+    a ? CENSUS_str_(a.draft_version) : null, !!a && CENSUS_str_(a.draft_version) === '3');
+  out.k4_expected_after = CENSUS_r6r6r4K4Swap_(R6R6R4_A_BEFORE_.k4_group_key,
+    R6R6R4_A_BEFORE_.last_mile_delivery, R6R6R4_A_AFTER_LAST_MILE_);
+  out.k4_actual_after = a ? CENSUS_str_(a.k4_group_key) : null;
+  CENSUS_r6r6r3P_(out, 'route_a_k4_is_the_frozen_key_with_only_the_last_mile_segment_replaced',
+    out.k4_expected_after, out.k4_actual_after,
+    !!out.k4_expected_after && !!a && CENSUS_str_(a.k4_group_key).toLowerCase() === out.k4_expected_after.toLowerCase());
+  // The audit trail moved the way the writer's contract says it moves.
+  var aFloor = CENSUS_r6r6r3TsMs_(R6R6R4_A_BEFORE_.updated_at);
+  ['updated_at', 'line_updated_at'].forEach(function (fld) {
+    var now = a ? CENSUS_r6r6r3TsMs_(a[fld]) : null;
+    CENSUS_r6r6r3P_(out, 'route_a_' + fld + '_advanced', 'later than ' + R6R6R4_A_BEFORE_.updated_at,
+      a ? CENSUS_str_(a[fld]) : null, now !== null && aFloor !== null && now > aFloor);
+  });
+  CENSUS_r6r6r3P_(out, 'route_a_updated_by_is_the_page', R6R6R4_PAGE_ACTOR_,
+    a ? CENSUS_str_(a.updated_by) : null, !!a && CENSUS_str_(a.updated_by) === R6R6R4_PAGE_ACTOR_);
+  // AND NOTHING ELSE ON ROUTE A MOVED.
+  CENSUS_r6r6r4CmpAll_(out, 'route_a', R6R6R4_A_BEFORE_, a,
+    R6R6R4_IDENTITY_FIELDS_.filter(function (k) { return k !== 'k4_group_key'; })
+      .concat(R6R6R4_BUSINESS_FIELDS_), out.snapshot_gaps);
+
+  // ---- ROUTE B: NOTHING AT ALL. --------------------------------------------------------------------------------
+  CENSUS_r6r6r4CmpAll_(out, 'route_b', R6R6R4_B_BEFORE_, b,
+    R6R6R4_IDENTITY_FIELDS_.concat(R6R6R4_BUSINESS_FIELDS_).concat(['last_mile_delivery'])
+      .concat(R6R6R4_AUDIT_FIELDS_), out.snapshot_gaps);
+  // THE TWO INSTANTS NOBODY SUPPLIED, PROVEN ANYWAY. Route B's stamps must predate Route A's new ones: the
+  // same writer on the same clock would have stamped both rows together had the Save reached both.
+  var aNow = a ? CENSUS_r6r6r3TsMs_(a.updated_at) : null;
+  ['updated_at', 'line_updated_at'].forEach(function (fld) {
+    var bNow = b ? CENSUS_r6r6r3TsMs_(b[fld]) : null;
+    out.derived_gates.push('route_b_' + fld + '_predates_the_route_a_save');
+    CENSUS_r6r6r3P_(out, 'route_b_' + fld + '_predates_the_route_a_save',
+      'strictly earlier than the post-save ' + (a ? CENSUS_str_(a.updated_at) : '(unknown)'),
+      b ? CENSUS_str_(b[fld]) : null, bNow !== null && aNow !== null && bNow < aNow);
+  });
+
+  // ---- THE SET DID NOT CHANGE SHAPE. ---------------------------------------------------------------------------
+  var total = CENSUS_num_(res.census_current_plan_total);
+  CENSUS_r6r6r3P_(out, 'current_plan_total_still_520', R6R6R4_SET_BEFORE_.current_plan_total, total,
+    total === R6R6R4_SET_BEFORE_.current_plan_total);
+  CENSUS_r6r6r3P_(out, 'visible_route_rows_still_2', R6R6R4_SET_BEFORE_.visible_route_rows, rows.length,
+    rows.length === R6R6R4_SET_BEFORE_.visible_route_rows);
+  var hCount = (res.sku_contributing_header_ids || []).length;
+  var lCount = (res.sku_contributing_line_ids || []).length;
+  CENSUS_r6r6r3P_(out, 'header_count_still_2', R6R6R4_SET_BEFORE_.header_count, hCount, hCount === R6R6R4_SET_BEFORE_.header_count);
+  CENSUS_r6r6r3P_(out, 'line_count_still_2', R6R6R4_SET_BEFORE_.line_count, lCount, lCount === R6R6R4_SET_BEFORE_.line_count);
+  var dupes = [], seen = {};
+  for (var di = 0; di < rows.length; di++) {
+    var k = CENSUS_str_(rows[di].allocation_draft_id) + '::' + CENSUS_str_(rows[di].allocation_draft_line_id);
+    if (seen[k]) dupes.push(k); else seen[k] = 1;
+  }
+  CENSUS_r6r6r3P_(out, 'no_duplicate_or_replacement_row', [], dupes, dupes.length === 0);
+  // NO SOFT-CANCEL AND NO RECREATION. A row that left `draft` left the plan, whatever the total happens to say.
+  CENSUS_r6r6r3P_(out, 'both_routes_still_draft', 'draft / draft',
+    (a ? CENSUS_str_(a.status) : '(missing)') + ' / ' + (b ? CENSUS_str_(b.status) : '(missing)'),
+    !!a && !!b && CENSUS_str_(a.status).toLowerCase() === 'draft' && CENSUS_str_(b.status).toLowerCase() === 'draft');
+
+  CENSUS_r6r6r3P_(out, 'readback_db_writes_is_zero', 0, out.db_writes, out.db_writes === 0);
+  CENSUS_r6r6r3P_(out, 'readback_writer_not_constructed', false, out.writer_constructed, out.writer_constructed === false);
+
+  if (out.predicates_failed === 0) out.verdict = 'SINGLE_ROW_MUTATION_CONFIRMED';
+  else out.stop_reason = out.predicates_failed + ' predicate(s) failed: '
+    + out.predicates.filter(function (p) { return !p.pass; }).map(function (p) { return p.predicate; }).join(', ');
+  return CENSUS_r6r6r4Finish_(out);
+}
+
+// ----------------------------------------------------------------------------------------------------------------
+// §7 — STAGE TWO, DESIGNED AND NOT AUTHORIZED. Read-only, and it has no write path at all.
+//
+// The restore is the same shape as stage one with the two values exchanged, which is the point: if the
+// isolation holds for truck -> parcel it must hold for parcel -> truck, and a design that needs a different
+// mechanism for the way back was not an isolation guarantee to begin with.
+// ----------------------------------------------------------------------------------------------------------------
+function RUN_R6R6R4_RESTORE_STAGE_TWO_MANIFEST() {
+  var out = {
+    census: 'RUN_R6R6R4_RESTORE_STAGE_TWO_MANIFEST',
+    build: TEMP_E3_CENSUS_BUILD_,
+    read_only: true, db_writes: 0, writer_constructed: false, writer_calls: 0,
+    submit_calls: 0, reservation_writes: 0, carrier_master_data_writes: 0,
+    authorized: false,          // ALWAYS false in this round.
+    executed: false,            // ALWAYS false. There is no write path in this function.
+    blocked_by: 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R6-R4 §7 authorizes stage one only. Stage two requires stage'
+      + ' one to have returned SINGLE_ROW_MUTATION_CONFIRMED and a separate current-turn authorization.',
+    precondition: 'RUN_R6R6R4_SINGLE_ROW_SAVE_READBACK returns SINGLE_ROW_MUTATION_CONFIRMED with zero failed'
+      + ' predicates. Until then the starting point of stage two is not established.',
+    action: 'Route A last_mile_delivery parcel -> truck, through the ordinary Execution Plan Save.',
+    expected: {
+      route_a_last_mile_before: R6R6R4_A_AFTER_LAST_MILE_,
+      route_a_last_mile_after: R6R6R4_A_BEFORE_.last_mile_delivery,
+      route_a_draft_version_before: '3',
+      route_a_draft_version_after: '4',
+      route_a_k4_after: R6R6R4_A_BEFORE_.k4_group_key,
+      route_a_updated_by_after: R6R6R4_PAGE_ACTOR_,
+      route_b: 'every field unchanged, draft_version still 3, updated_by still ' + R6R6R4_REPAIR_ACTOR_,
+      set: R6R6R4_SET_BEFORE_
+    },
+    // THE SYMMETRY, STATED AS A MAPPING rather than as a second copy of the code. Stage two runs the SAME two
+    // entry points with the frozen BEFORE advanced one version and the two last-mile values exchanged; nothing
+    // else about either contract changes, and that is what makes it a restore rather than a new operation.
+    readiness_design: {
+      entry_point: 'RUN_R6R6R4_SINGLE_ROW_SAVE_READINESS, with R6R6R4_A_BEFORE_ advanced to the stage-one'
+        + ' AFTER: last_mile_delivery parcel, draft_version 3, k4 the parcel key, updated_at/line_updated_at'
+        + ' the values stage one recorded, updated_by ' + R6R6R4_PAGE_ACTOR_ + '.',
+      unchanged: ['every Route B field', 'every set invariant', 'the save-target REUSE predicate',
+        'the three self-checks that this read wrote nothing'],
+      success_verdict: 'SINGLE_ROW_SAVE_READY'
+    },
+    readback_design: {
+      entry_point: 'RUN_R6R6R4_SINGLE_ROW_SAVE_READBACK, with R6R6R4_A_AFTER_LAST_MILE_ read as truck and the'
+        + ' version gate reading 4. The K4 gate stays a SUBSTITUTION of the last-mile segment, so it derives'
+        + ' the truck key from the parcel key exactly as stage one derived the parcel key from the truck one.',
+      unchanged: ['Route B proven by version, actor and the predates-the-save comparison',
+        'the set invariants', 'the no-duplicate and still-draft gates'],
+      success_verdict: 'SINGLE_ROW_MUTATION_CONFIRMED'
+    },
+    ui_note: 'Route A may display a last mile before and after either stage. The display is not the column.',
+    verdict: 'STAGE_TWO_DESIGNED_NOT_AUTHORIZED'
+  };
+  CENSUS_log_('r6r6r4_stage_two', out.verdict + ' — ' + out.blocked_by);
+  return out;
+}
+
+function CENSUS_r6r6r4Finish_(out) {
+  // Asserted on the way out, so the same four zeroes are readable whichever entry point produced the answer.
+  out.read_only = true;
+  out.db_writes = CENSUS_num_(out.db_writes) || 0;
+  out.writer_constructed = out.writer_constructed === true;
+  out.writer_calls = CENSUS_num_(out.writer_calls) || 0;
+  out.submit_calls = CENSUS_num_(out.submit_calls) || 0;
+  out.reservation_writes = CENSUS_num_(out.reservation_writes) || 0;
+  out.stage_two_authorized = false;
+  CENSUS_log_('r6r6r4', out.census + ' ' + out.verdict + ' — passed ' + out.predicates_passed
+    + ' failed ' + out.predicates_failed);
+  if (out.snapshot_gaps.length) CENSUS_log_('r6r6r4_snapshot_gaps', out.snapshot_gaps.join(', '));
+  out.predicates.forEach(function (p) {
+    if (!p.pass) CENSUS_log_('r6r6r4_failed', p.predicate + ': expected ' + JSON.stringify(p.expected)
+      + ' observed ' + JSON.stringify(p.observed));
   });
   return out;
 }

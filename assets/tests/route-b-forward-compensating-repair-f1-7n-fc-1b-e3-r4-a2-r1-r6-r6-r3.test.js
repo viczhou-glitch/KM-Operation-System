@@ -749,12 +749,23 @@ mut('N10 a predicate that reports pass without being counted', function () {
 // ================================================================================================================
 section('DEPLOYMENT');
 // ================================================================================================================
-eq((CENSUS.match(/var TEMP_E3_CENSUS_BUILD_ = '([^']+)'/) || [])[1], 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R6-R3',
-  'D1  the diagnostic declares this round');
-ok(RO.OWNER_STAMPS.indexOf('F1-7N-FC-1B-E3-R4-A2-R1-R6-R6-R3') !== -1, 'D1a and the ledger records it');
-ok(RO.BUILD_STAMP_RE.test('F1-7N-FC-1B-E3-R4-A2-R1-R6-R6-R3'), 'D1b as a well-formed stamp');
-eq(RO.currentAppToken(), 'fc1be3r4a2r1r6r6r2-rowisolation-20260906',
-  'D2  the FRONTEND cache token did NOT move — no frontend file changed this round');
+// R6-R6-R4 — ANOTHER EQUALITY WITH NOW, of exactly the kind R6-R6-R3 removed from the R6-R6-R2 suite and
+// then reintroduced here. A stamp records the round a file last CHANGED; every later round that touches
+// the census moves it, and this suite's own claim is only that the census changed in R6-R6-R3 OR LATER.
+var _d1Declared = (CENSUS.match(/var TEMP_E3_CENSUS_BUILD_ = '([^']+)'/) || [])[1];
+ok(RO.OWNER_STAMPS.indexOf(_d1Declared) >= RO.OWNER_STAMPS.indexOf('F1-7N-FC-1B-E3-R4-A2-R1-R6-R6-R3'),
+  'D1  the diagnostic declares R6-R6-R3 or a later round (' + _d1Declared + ')');
+ok(RO.OWNER_STAMPS.indexOf('F1-7N-FC-1B-E3-R4-A2-R1-R6-R6-R3') !== -1,
+  'D1a and the ledger still records the round this suite belongs to');
+ok(RO.BUILD_STAMP_RE.test(_d1Declared), 'D1b and whatever it declares is a well-formed stamp');
+// R6-R6-R4 — THIS PINNED currentAppToken(), WHICH IS AN EQUALITY WITH NOW. The claim this suite owns is
+// that R6-R6-R3 changed no frontend file and therefore introduced NO token of its own; pinning whatever
+// happened to be current said that only while R6-R6-R3 was the last round, and R6-R6-R4 does move a
+// frontend file. Stated directly instead, so it stays true for every round that follows.
+eq(RO.ROUND_TOKENS.filter(function (t) { return /r6r6r3/i.test(t); }), [],
+  'D2  R6-R6-R3 introduced NO cache token — it changed no frontend file, and reused the one R6-R6-R2 published');
+ok(RO.ROUND_TOKENS.indexOf('fc1be3r4a2r1r6r6r2-rowisolation-20260906') !== -1,
+  'D2a and the token it reused is still in the ledger');
 eq(G16.indexOf('R6-R6-R3'), -1, 'D3  16_ is untouched: the repair uses the shipped writer exactly as it is');
 eq(read('assets/specs/active/apps-script/01_router.gs').indexOf('R6-R6-R3'), -1,
   'D3a and so is the router — nothing new is reachable over HTTP');

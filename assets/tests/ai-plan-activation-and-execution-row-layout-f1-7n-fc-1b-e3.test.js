@@ -1037,6 +1037,11 @@ ok(/function TEMP_AI_PLAN_ACTIVATION_CENSUS_FC1B_E3\(args\)/.test(TEMP), 'F1  th
     // it re-runs the preflight, calls the writer at most once and never retries.
     'RUN_R6R6R3_ROUTE_B_REPAIR_EXECUTE_ONCE', 'RUN_R6R6R3_ROUTE_B_REPAIR_PREFLIGHT',
     'RUN_R6R6R3_ROUTE_B_REPAIR_READBACK',
+    // R6-R6-R4 adds the post-repair single-row Save trio: a readiness against a NEW production baseline, a
+    // readback, and stage two DESIGNED and refused. All three are read-only and take no arguments, and the
+    // writer count assertions elsewhere in this project still read ONE — R6-R6-R3's, unchanged.
+    'RUN_R6R6R4_RESTORE_STAGE_TWO_MANIFEST', 'RUN_R6R6R4_SINGLE_ROW_SAVE_READBACK',
+    'RUN_R6R6R4_SINGLE_ROW_SAVE_READINESS',
     // R6-R6-R1 adds the two no-argument entry points the editor can actually run: the pre-write readiness
     // verdict and the frozen readback. Listed in SORTED order, because the assertion compares sorted lists.
     'RUN_R6R6_MANUAL_ROUTE_SAVE_FROZEN_READINESS',

@@ -746,12 +746,18 @@ mut('N12 the ETA field reintroduced into the line payload', function () {
 // ================================================================================================================
 section('DEPLOYMENT');
 // ================================================================================================================
-eq(RO.currentAppToken(), 'fc1be3r4a2r1r6r6r2-rowisolation-20260906',
-  'D1  the application cache token moved — three frontend files changed, and a stale copy still writes Route B');
-eq((INDEX.match(/fc1be3r4a2r1r6r6r2-rowisolation-20260906/g) || []).length, 21,
-  'D1a and every one of the 21 script/style references carries it');
-eq((INDEX.match(/fc1be3r4a2r1r6r6-compactrecon-20260905/g) || []).length, 0,
-  'D1b with none left on the previous token');
+// R6-R6-R4 — THE THIRD EQUALITY WITH NOW IN THIS FAMILY, and the same repair. This suite owns two claims:
+// that R6-R6-R2 introduced a token OF ITS OWN (three frontend files changed, and a stale copy of any of
+// them still writes Route B), and that index.html carries ONE token throughout. Pinning currentAppToken()
+// to R6-R6-R2's literal expressed the first only while R6-R6-R2 was the last round to touch a frontend
+// file, and R6-R6-R4 changes two of them. Both claims are stated directly instead.
+var _d1Tok = 'fc1be3r4a2r1r6r6r2-rowisolation-20260906';
+ok(RO.ROUND_TOKENS.indexOf(_d1Tok) > RO.ROUND_TOKENS.indexOf('fc1be3r4a2r1r6r6-compactrecon-20260905'),
+  'D1  R6-R6-R2 introduced a cache token of its own, after the round it superseded');
+eq(RO.staleAppTokenRefs(INDEX), [],
+  'D1a and index.html carries the CURRENT token on every reference — no half-updated deployment');
+ok(RO.appTokenRefCount(INDEX) >= 21,
+  'D1b across all ' + RO.appTokenRefCount(INDEX) + ' script and style references in the co-deployed set');
 // R6-R6-R3 — THIS WAS AN EQUALITY WITH NOW, and the first later round to touch the file broke it. The
 // claim this suite actually owns is that the diagnostic changed in R6-R6-R2 OR LATER; pinning the literal
 // made every future round's stamp bump look like a regression in THIS round's evidence.

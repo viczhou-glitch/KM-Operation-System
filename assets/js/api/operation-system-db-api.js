@@ -3771,9 +3771,20 @@ function _kmReportSample_(action, kind, startedAt, code, phase, bytes, extra) {
 // 'which ROWS did the page address, and which COLUMNS was it setting?', and nothing recorded that. Identities,
 // counts and field NAMES answer it completely. A quantity, a note or an override reason answers nothing extra
 // and is the sort of thing a diagnostic log has no business carrying, so none of them are read here.
+// R6-R6-R4 §5 — FOUR FACTS THE AUDIT NEEDED AND THIS COULD NOT REPORT. After the 2026-09-06 incident the
+// question asked of a write is no longer 'which rows did it name?' but 'was it the UPDATE we meant, of the
+// version we read, or something that could mint a twin?'. `intent`, `expected_draft_version`,
+// `has_create_idempotency_key` and `mints_new_row` answer exactly that, and none of them carries a value:
+// an intent token, a version string, and two booleans.
+//
+// `changed_fields` IS NOT A DIFF, and naming it that has always been generous. It is the set of field names
+// the payload CARRIES, and an UPDATE echoes the whole header — so a one-column edit legitimately lists a
+// dozen names. The proof that only one column moved is the database readback, never this list. Kept under
+// its existing name because it is what four suites already read, and stated plainly here instead.
 function _kmMutationShape_(command, payload) {
     var out = { routes_in_payload: null, allocation_draft_id: null, allocation_draft_line_ids: null,
-        changed_fields: null };
+        changed_fields: null, intent: null, expected_draft_version: null,
+        has_create_idempotency_key: null, mints_new_row: null };
     try {
         var p = payload || {};
         var h = p.header || null;
@@ -3792,6 +3803,19 @@ function _kmMutationShape_(command, payload) {
         }
         var ks = Object.keys(names);
         if (ks.length) out.changed_fields = ks.sort();
+        // The intent and the version are read from the header FIRST and the envelope second, because that is
+        // the order the server resolves them in; reporting the envelope's copy when the header disagrees
+        // would describe a request the writer never saw.
+        out.intent = String((h && h.intent) || p.intent || '') || null;
+        out.expected_draft_version = ((h && h.expected_draft_version) != null)
+            ? String(h.expected_draft_version)
+            : ((p.expected_draft_version != null) ? String(p.expected_draft_version) : null);
+        out.has_create_idempotency_key = !!((h && h.create_idempotency_key) || p.create_idempotency_key);
+        // A row is MINTED when the payload names no line id for it, or when the intent is a create. Either
+        // one turns 'update the route on screen' into 'add a second route that looks like it'.
+        out.mints_new_row = (String(out.intent || '').toUpperCase().indexOf('CREATE') !== -1)
+            || (Array.isArray(out.allocation_draft_line_ids)
+                && out.allocation_draft_line_ids.indexOf('(new)') !== -1);
     } catch (e) { /* a diagnostic that can throw is worse than one that is silent */ }
     return out;
 }
