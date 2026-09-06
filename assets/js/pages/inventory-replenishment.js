@@ -4222,8 +4222,28 @@ window._newRouteInstanceId = _newRouteInstanceId;
 var IR_ROUTE_PERSISTABLE_FIELDS = ['source_warehouse_id', 'destination_warehouse_id', 'destination_marketplace',
     'shipping_method', 'last_mile_delivery', 'qty', 'units_per_carton', 'recommendation_group_no',
     'override_reason', 'note', 'window_code', 'site_sku'];
+// F1-7N-FC-1B-E3-R4-A2-R1-R6-R6-R2 §3/§4 — THE SIGNATURE COMPARES WHAT A PERSON AUTHORED.
+//
+// This decides whether a route is a write candidate, so every value it reads has to be a value somebody put
+// there. A last mile the LANE supplied (the single eligible option on a one-profile service) or that a
+// re-render BLANKED (the stored value is no longer eligible for the chosen method) is neither of those, and
+// comparing it is precisely how one gesture on Route A came to write Route B on 2026-09-06: the derived
+// `parcel` sitting in a route nobody had touched compared as an edit against the blank the database held.
+//
+// The row KEEPS the derived value — it is what that route would actually ship under, and it is written when
+// the row is written for a real reason, such as the operator changing its method. What it stops being is
+// evidence that there IS a real reason.
+//
+// Written inline rather than as a helper on purpose: four suites lift this function on its own, so a symbol
+// it calls by name is a symbol that can be absent where it runs. Guarding that call with `typeof` would be
+// worse than either option, because the fallback would silently restore the old comparison and a harness
+// would pass while measuring the defect.
 function _irRouteSignature_(r) {
-    return IR_ROUTE_PERSISTABLE_FIELDS.map(function (f) { return String((r && r[f]) == null ? '' : r[f]).trim(); }).join('\u0001');
+    var derived = !!(r && r.last_mile_derived === true);
+    return IR_ROUTE_PERSISTABLE_FIELDS.map(function (fld) {
+        var v = (derived && fld === 'last_mile_delivery') ? (r && r.last_mile_persisted) : (r && r[fld]);
+        return String(v == null ? '' : v).trim();
+    }).join('\u0001');
 }
 function _irMarkRouteTouched_(sku, instanceId) {
     var k = String(instanceId || '').trim(); if (!k) return;
@@ -5104,14 +5124,17 @@ function _flushDraftDbPersist(sku) {
         // upstream came back downstream and landed in `_incomplete`. Zero writes, and a full red
         // "database update failed" panel with Technical details and "Retryable: yes".
         //
-        // The fallback itself STAYS: `_persistAllocationDraftToDb` (the AI Plan and older callers) schedules a
-        // flush without marking anything, and those routes are written only because of it. What changes is
-        // that a row which is not a write candidate in ANY branch is filtered out of the scope, so the two
-        // statements "a composer is never queued" and "a composer is never in the write scope" are the same
-        // statement instead of two that can drift apart.
-        var _scoped = (_touched.length
-            ? rows.filter(function (r) { return _touchedSet[String(r.client_route_instance_id || '')]; })
-            : rows).filter(function (r) { return !(_irIsComposerRow_(r) && !_isRouteComplete(r)); });
+        // F1-7N-FC-1B-E3-R4-A2-R1-R6-R6-R2 §3 — THE FALLBACK IS GONE. An empty touched set used to widen the
+        // scope to EVERY row on screen, on the reasoning that `_persistAllocationDraftToDb` (the AI Plan and
+        // older callers) schedules a flush without marking anything. That made "which routes did this event
+        // change?" answerable two ways, and the weaker answer was reachable from any caller that forgot to
+        // mark — including one that had nothing to write at all. An empty intent set is now literally empty:
+        // no dirty route, no request. The legacy callers DECLARE their scope instead (see
+        // `_persistAllocationDraftToDb`), so the widening still happens where it is wanted and is now a
+        // statement someone made rather than a consequence of a missing one.
+        var _scoped = rows
+            .filter(function (r) { return _touchedSet[String(r.client_route_instance_id || '')]; })
+            .filter(function (r) { return !(_irIsComposerRow_(r) && !_isRouteComplete(r)); });
         // R6-R6 §7 — A ROUTE UNDER AN ACK_UNKNOWN HOLD IS NOT A WRITE CANDIDATE, IN EITHER BRANCH.
         // Filtered here rather than at the call sites for the reason R2 gave for the composer: two statements
         // that must agree are better as one statement. Note this also covers the empty-touched-set fallback,
@@ -5316,7 +5339,21 @@ function _flushDraftDbPersist(sku) {
 window._flushDraftDbPersist = _flushDraftDbPersist;
 
 // Back-compat entry point (older callers / AI Plan): route through the debounced flush.
-function _persistAllocationDraftToDb(sku) { _scheduleDraftDbPersist(sku); }
+//
+// R6-R2 §3 — IT DECLARES ITS SCOPE. This used to schedule a flush and mark nothing, and the flush's
+// empty-touched-set fallback then wrote every complete route on screen. The behaviour is kept exactly
+// (a caller that persists "the draft" means all of it) and is now SAID: the routes this call intends to
+// write are marked as its intent, so the flush needs no rule about what an absence of intent means.
+function _persistAllocationDraftToDb(sku) {
+    try {
+        ((replenAllocationDraft.bySku && replenAllocationDraft.bySku[sku]) || []).forEach(function (r) {
+            if (!r || String(r.route_kind || '') === _irComposerKind_()) return;
+            if (!_isRouteComplete(r)) return;
+            _irMarkRouteTouched_(sku, r.client_route_instance_id);
+        });
+    } catch (e) { try { console.warn('[replen] draft persist scope declaration failed:', e); } catch (e2) {} }
+    _scheduleDraftDbPersist(sku);
+}
 window._persistAllocationDraftToDb = _persistAllocationDraftToDb;
 
 // F1-7N-FA-3C-R6E-P0 — normalize a raw save error (a plain string OR the structured envelope {code,message,details}
@@ -6452,12 +6489,22 @@ function _saveAllocationDraftFromDom(sku) {
         // ALL rows are kept in the local render/recovery draft so an in-progress (still incomplete) route
         // survives collapse/expand. Whether a row is PERSISTED to the DB is decided ONLY by the shared
         // four-field completeness gate below — a truthy "any intent" check is NOT enough (§4).
+        // R6-R2 §4 — WHO AUTHORED THIS LAST MILE. The effective value is still collected exactly as before,
+        // because a row that IS being written must carry the last mile it will actually ship under. What is
+        // recorded beside it is whether the row is that value's author: a lane that filled the cell in, or a
+        // re-render that blanked an ineligible value, is not. The touched diff reads THIS, so a derived value
+        // can no longer make a route a write candidate on its own.
+        var _lmEl = rowEl.querySelector('[data-field="last_mile_delivery"]');
+        var _lmDerived = !!(_lmEl && _lmEl.getAttribute && _lmEl.getAttribute('data-lastmile-derived') === '1')
+            && String(rowEl.getAttribute('data-lastmile-dirty') || '') !== '1';
         var row = {
             shipping_method: method,
             // R6-R1 §5 — collected from whichever control the row rendered: a picker when the method is
             // ambiguous, a hidden field carrying the single value when it is not. Blank stays blank; nothing
             // is invented, and nothing is written into a field that is not its own.
             last_mile_delivery: fieldVal('last_mile_delivery'),
+            last_mile_derived: _lmDerived,
+            last_mile_persisted: String(rowEl.getAttribute('data-lastmile-persisted') || ''),
             qty: qty,                              // = planned_qty (canonical)
             planned_qty: qty,
             source_warehouse_id: sourceWarehouseId,   // canonical From (warehouse_id)
@@ -6863,7 +6910,17 @@ function _irLastMileChoices_(methods, selectedMethod, selectedLastMile, eta) {
     if (!opts.length) value = sel;
     else if (opts.length === 1) value = opts[0];
     else value = stillEligible ? sel : '';
-    return { options: opts, ambiguous: opts.length > 1, value: value,
+    // F1-7N-FC-1B-E3-R4-A2-R1-R6-R6-R2 §4 — DERIVED, AND IT SAYS SO.
+    //
+    // Two of these three branches can return a value the ROW never held: a lane with exactly one eligible
+    // last mile fills it in, and an ineligible stored value is blanked. Both are right for what the operator
+    // SEES — a single-option lane has nothing to ask, and an invalidated value must not be shown as still
+    // chosen. Neither is an operator's decision, and on 2026-09-06 the difference was invisible: the derived
+    // value went into the same DOM field the collector reads as intent, so a route nobody had touched
+    // compared as edited and was written. The value is unchanged; what is added is the fact that the row is
+    // not its author.
+    var derived = String(value).toLowerCase() !== selLow;
+    return { options: opts, ambiguous: opts.length > 1, value: value, derived: derived,
         invalidated: !!(sel && opts.length && !stillEligible), method_matched: !!m };
 }
 window._irLastMileChoices_ = _irLastMileChoices_;
@@ -6875,6 +6932,9 @@ window._irLastMileChoices_ = _irLastMileChoices_;
 function _irLastMileCellHtml_(methods, selectedMethod, selectedLastMile, eta, sku, isComposer) {
     var c = _irLastMileChoices_(methods, selectedMethod, selectedLastMile, eta);
     var onchange = (isComposer ? 'onExecutionComposerEdit' : 'onExecutionMethodEdit') + '(\'' + sku + '\', this)';
+    // Published on the control itself rather than on the row, because it is a fact about THIS value: a later
+    // repaint that produces an authored value clears it by construction, with nothing to remember to reset.
+    var derivedAttr = c.derived ? ' data-lastmile-derived="1"' : '';
     if (c.ambiguous) {
         var opts = '<option value="">Last mile…</option>';
         var selLow = String(c.value).toLowerCase();
@@ -6883,6 +6943,7 @@ function _irLastMileCellHtml_(methods, selectedMethod, selectedLastMile, eta, sk
                 (selLow === String(lm).toLowerCase() ? ' selected' : '') + '>' + _execEsc(lm) + '</option>';
         });
         return '<select class="replen-card__select replen-card__select--lastmile" data-field="last_mile_delivery"'
+            + derivedAttr
             + ' aria-label="Last mile" title="Last mile" onchange="' + onchange + '"'
             + ' onclick="event.stopPropagation()">' + opts + '</select>';
     }
@@ -6890,7 +6951,8 @@ function _irLastMileCellHtml_(methods, selectedMethod, selectedLastMile, eta, sk
     // different fact from an unanswered question and must not look like one.
     var shown = c.value || '—';
     return '<span class="replen-card__lastmile-static" title="' + _execEsc(shown) + '">' + _execEsc(shown) + '</span>'
-        + '<input type="hidden" data-field="last_mile_delivery" value="' + _execEsc(c.value) + '">';
+        + '<input type="hidden" data-field="last_mile_delivery"' + derivedAttr
+        + ' value="' + _execEsc(c.value) + '">';
 }
 window._irLastMileCellHtml_ = _irLastMileCellHtml_;
 
@@ -6902,6 +6964,17 @@ function _irPaintLastMileCell_(rowEl, methods, selectedMethod, eta, sku) {
     if (!cell) return null;
     var cur = cell.querySelector('[data-field="last_mile_delivery"]');
     var chosen = cur ? String(cur.value || '').trim() : '';
+    // R6-R2 §4 — WITHOUT THIS, DERIVED-NESS EVAPORATES ON THE SECOND REPAINT. This function feeds the
+    // current control value back into the choice, so once a single-option lane has filled the cell in, the
+    // next repaint sees that value as the row's own and returns derived=false. The marker would then be
+    // true exactly once and false forever after, which is worse than never having it. So a control that is
+    // still carrying a derived value is fed the ROW'S STORED value instead — the same input the first
+    // paint had — and the answer is stable across any number of repaints.
+    var _lmWasDerived = !!(cur && cur.getAttribute && cur.getAttribute('data-lastmile-derived') === '1');
+    var _lmAuthored = !!(rowEl.getAttribute && rowEl.getAttribute('data-lastmile-dirty') === '1');
+    if (_lmWasDerived && !_lmAuthored) {
+        chosen = String((rowEl.getAttribute && rowEl.getAttribute('data-lastmile-persisted')) || '').trim();
+    }
     // The row already knows whether it is a composer; asking it here means no caller has to carry the answer,
     // and no caller can get it wrong. Guarded, because a composer row is a page concept and this is also
     // exercised in isolation.
@@ -7918,6 +7991,10 @@ function _renderExecutionRoute(sku, route) {
     // the carrier catalogue is still loading, and the async rebuild that follows reads the DOM; without this the
     // persisted service is simply gone by the time the options exist. Never a label — the stored value itself.
     row.setAttribute('data-method-persisted', String((route && route.shipping_method) || ''));
+    // R6-R2 §4 — the STORED last mile, for exactly the reason the stored method needs one: a collect
+    // rebuilds every row from the DOM, and the cell may be showing a value the lane derived rather than the
+    // one the database holds. Without this the row has no way to answer 'what did I actually come in as?'.
+    row.setAttribute('data-lastmile-persisted', String((route && route.last_mile_delivery) || ''));
     // §D/§G — the STORED source warehouse code snapshot, kept with the row for the same reason: a collect
     // rebuilds every row from the DOM, and a snapshot that is not on the row cannot survive one.
     row.setAttribute('data-src-code-persisted', String((route && route.source_warehouse_code) || ''));
@@ -7964,7 +8041,13 @@ function _renderExecutionRoute(sku, route) {
 function onExecutionMethodEdit(sku, el) {
     try {
         var row = el && el.closest ? el.closest('.exec-route-row') : null;
-        if (row) row.setAttribute('data-method-dirty', '1');
+        // R6-R2 §4 — THE LAST MILE PICKER ALSO ARRIVES HERE, and it used to mark the METHOD dirty. That
+        // is not a cosmetic mislabel: `data-method-dirty` is what tells the async catalogue rebuild that an
+        // empty Method <select> means 'the operator cleared it' rather than 'the options had not loaded',
+        // so choosing a last mile could make the row forget its own persisted service. Each control now
+        // marks its own field, and the last mile gains the marker that gives its value operator authority.
+        var _field = String((el && el.getAttribute && el.getAttribute('data-field')) || '');
+        if (row) row.setAttribute(_field === 'last_mile_delivery' ? 'data-lastmile-dirty' : 'data-method-dirty', '1');
     } catch (e) {}
     if (typeof onExecutionRouteEdit === 'function') onExecutionRouteEdit(sku);
 }

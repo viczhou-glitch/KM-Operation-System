@@ -262,7 +262,14 @@ var ROUND_TOKENS = [
   // the next unrelated edit. A browser holding the R6-R5 copy keeps both old behaviours — the paragraph the
   // operator asked to have removed, and a blind second write after an ambiguous ACK — and the second of those
   // is a correctness defect, not a cosmetic one.
-  'fc1be3r4a2r1r6r6-compactrecon-20260905'
+  'fc1be3r4a2r1r6r6-compactrecon-20260905',
+  // R6-R6-R2: single-row mutation isolation. A browser holding the R6-R6 copy still writes a route the
+  // operator never touched: a lane with exactly one eligible last mile fills the cell in, that derived value
+  // lands in the same DOM field the collector reads as intent, and the next edit on ANY row on the card
+  // carries it to the database as though a person had chosen it. This is the round that separates a derived
+  // display value from an authored one, so it is the token that must move — a stale copy of this page is a
+  // page that writes rows nobody asked it to.
+  'fc1be3r4a2r1r6r6r2-rowisolation-20260906'
 ];
 
 // The newest entry is the current APPLICATION token, by construction rather than by restatement - the same
@@ -555,7 +562,7 @@ var BUILD_STAMP_RE = /^F1-7N-[A-Z]+-\d+[A-Z](?:-(?:R\d+[A-Z]?\d*|E\d+|A\d+|B\d+)
 // or after round X". A0-R1 moved the stamp and broke all four in one step — the exact failure a duplicated
 // constant exists to produce. Append-only; a round that moves SAD_BUILD_VERSION_ adds one line here and
 // nowhere else.
-var OWNER_STAMPS = ['F1-7N-FB-4D', 'F1-7N-FB-4F-B1', 'F1-7N-FB-4F-B3', 'F1-7N-FB-4F-B6', 'F1-7N-FB-4G-A0-R1', 'F1-7N-FB-4G-A0-R2', 'F1-7N-FB-4G-A2', 'F1-7N-FB-4G-A2-R2', 'F1-7N-FB-4G-A2-R3', 'F1-7N-FB-4G-A2-R3-R1', 'F1-7N-FB-4G-A2-R4', 'F1-7N-FB-4G-A3', 'F1-7N-FC-0A', 'F1-7N-FC-1A', 'F1-7N-FC-1A-R1', 'F1-7N-FC-1B-E3', 'F1-7N-FC-1B-E3-R1', 'F1-7N-FC-1B-E3-R2', 'F1-7N-FC-1B-E3-R3-R1', 'F1-7N-FC-1B-E3-R4', 'F1-7N-FC-1B-E3-R4-A1', 'F1-7N-FC-1B-E3-R4-A2-R1', 'F1-7N-FC-1B-E3-R4-A2-R1-R1', 'F1-7N-FC-1B-E3-R4-A2-R1-R2', 'F1-7N-FC-1B-E3-R4-A2-R1-R3', 'F1-7N-FC-1B-E3-R4-A2-R1-R4', 'F1-7N-FC-1B-E3-R4-A2-R1-R5', 'F1-7N-FC-1B-E3-R4-A2-R1-R6', 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R1', 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R2', 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R3', 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R4', 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R5', 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R6', 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R6-R1', 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R6-R1-B1'];
+var OWNER_STAMPS = ['F1-7N-FB-4D', 'F1-7N-FB-4F-B1', 'F1-7N-FB-4F-B3', 'F1-7N-FB-4F-B6', 'F1-7N-FB-4G-A0-R1', 'F1-7N-FB-4G-A0-R2', 'F1-7N-FB-4G-A2', 'F1-7N-FB-4G-A2-R2', 'F1-7N-FB-4G-A2-R3', 'F1-7N-FB-4G-A2-R3-R1', 'F1-7N-FB-4G-A2-R4', 'F1-7N-FB-4G-A3', 'F1-7N-FC-0A', 'F1-7N-FC-1A', 'F1-7N-FC-1A-R1', 'F1-7N-FC-1B-E3', 'F1-7N-FC-1B-E3-R1', 'F1-7N-FC-1B-E3-R2', 'F1-7N-FC-1B-E3-R3-R1', 'F1-7N-FC-1B-E3-R4', 'F1-7N-FC-1B-E3-R4-A1', 'F1-7N-FC-1B-E3-R4-A2-R1', 'F1-7N-FC-1B-E3-R4-A2-R1-R1', 'F1-7N-FC-1B-E3-R4-A2-R1-R2', 'F1-7N-FC-1B-E3-R4-A2-R1-R3', 'F1-7N-FC-1B-E3-R4-A2-R1-R4', 'F1-7N-FC-1B-E3-R4-A2-R1-R5', 'F1-7N-FC-1B-E3-R4-A2-R1-R6', 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R1', 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R2', 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R3', 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R4', 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R5', 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R6', 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R6-R1', 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R6-R1-B1', 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R6-R2'];
 // True when `stamp` is a known owner stamp at or after `floor` in that order.
 function stampAtOrAfter(stamp, floor) {
   var i = OWNER_STAMPS.indexOf(String(stamp)), f = OWNER_STAMPS.indexOf(String(floor));

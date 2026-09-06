@@ -385,13 +385,22 @@
     function timeline() {
       var rows = _metrics.samples.filter(function (s) { return typeof s.dispatch_ms === 'number'; })
         .map(function (s) {
-          return { seq: s.seq, action: s.action, kind: s.kind, owner: s.owner || null, reason: s.reason || null,
+          return { seq: s.seq, action: s.action, kind: s.kind || 'read', owner: s.owner || null, reason: s.reason || null,
             payload_fingerprint: s.payload_fingerprint || null,
             dispatch_ms: s.dispatch_ms, settled_ms: s.settled_ms, elapsed_ms: s.ms,
             concurrent_at_dispatch: s.concurrent_at_dispatch,
             code: s.code || null, phase: s.phase || null, http_status: s.http_status,
             redirected: s.redirected === true, server_answered: s.server_answered, server_ms: s.server_ms,
-            request_id: s.request_id || null, attempts: s.attempts };
+            request_id: s.request_id || null, attempts: s.attempts,
+            // §5 — OBSERVED or EXTERNAL_RECONSTRUCTED. A row whose interval was reconstructed from a duration
+            // must not be read as though it had been timed at dispatch, and the only way to keep that true is
+            // to say so on the row itself.
+            marks_source: s.marks_source || 'OBSERVED',
+            routes_in_payload: (typeof s.routes_in_payload === 'number') ? s.routes_in_payload : null,
+            allocation_draft_id: s.allocation_draft_id || null,
+            allocation_draft_line_ids: s.allocation_draft_line_ids || null,
+            changed_fields: s.changed_fields || null,
+            outcome: s.outcome || null };
         })
         .sort(function (a, b) { return a.dispatch_ms - b.dispatch_ms || a.seq - b.seq; });
       // Two requests OVERLAP when each was open while the other was. Computed from the recorded intervals, so
@@ -410,6 +419,10 @@
       return {
         epoch_offset_ms: 0,
         request_timeline: withOverlap,
+        // §5 — the mutations, alone. `timeline()` answered 'what did the page request?' and was read as
+        // 'what did the page WRITE?'. Those are the same list only when every write is in it.
+        mutations: withOverlap.filter(function (r) { return r.kind === 'write'; }),
+        mutation_requests: withOverlap.filter(function (r) { return r.kind === 'write'; }).length,
         peak_concurrent_requests: _peakConcurrent,
         requests: withOverlap.length,
         // A request that was ALONE for its whole life had no contention to blame, whatever it cost.
@@ -462,9 +475,31 @@
                 phase: code ? 'DISPATCH' : 'SUCCESS', ms: (_now() - t0), bytes: bytes || 0 });
         };
     }
+    // F1-7N-FC-1B-E3-R4-A2-R1-R6-R6-R2 §5 — AN EXTERNAL SAMPLE NOW REACHES THE TIMELINE.
+    //
+    // MEASURED on the 2026-09-06 incident: `timeline()` keeps only samples carrying `dispatch_ms`, and that
+    // field is set exclusively by this module's own `run()`. Every mutation in the application is issued by
+    // `_kmWeeklyCommand_`, which owns its fetch and reports here — so two writes that changed two production
+    // routes were recorded in `metrics()` and were STRUCTURALLY ABSENT from `timeline()`. The operator read
+    // the timeline, saw only workspace reads, and concluded no mutation had been sent. The evidence was not
+    // wrong; it was answering a narrower question than it appeared to.
+    //
+    // The two offsets are RECONSTRUCTED from the reported duration rather than observed at dispatch, which is
+    // exactly the inference §2 forbids making SILENTLY. So it is labelled: `marks_source` says which rows were
+    // observed and which were reconstructed, and a reader can discount an overlap computed from the latter.
+    // A missing duration stays missing — a row with no `ms` is not given a fabricated interval.
     function recordExternal(sample) {
         sample = isObj(sample) ? sample : {};
-        record({ action: str(sample.action) || '(unknown)', kind: (str(sample.kind) === 'write') ? 'write' : 'read',
+        var _ms = (typeof sample.ms === 'number' && sample.ms >= 0) ? sample.ms : null;
+        var _settled = _now() - _epoch;
+        var _extMarks = (_ms === null) ? {} : {
+          seq: ++_seq,
+          dispatch_ms: Math.max(0, _settled - _ms),
+          settled_ms: _settled,
+          concurrent_at_dispatch: _openRequests,
+          marks_source: 'EXTERNAL_RECONSTRUCTED'
+        };
+        record(Object.assign({ action: str(sample.action) || '(unknown)', kind: (str(sample.kind) === 'write') ? 'write' : 'read',
             code: sample.code ? str(sample.code) : null, phase: str(sample.phase) || null,
             ms: (typeof sample.ms === 'number' && sample.ms >= 0) ? sample.ms : 0,
             bytes: (typeof sample.bytes === 'number' && sample.bytes >= 0) ? sample.bytes : 0,
@@ -478,7 +513,15 @@
             server_answered: (typeof sample.server_answered === 'boolean') ? sample.server_answered : null,
             server_ms: (typeof sample.server_ms === 'number') ? sample.server_ms : null,
             request_id: sample.request_id ? str(sample.request_id) : null,
-            external: true });
+            // §5 — THE MUTATION'S OWN SHAPE. Identities, counts and FIELD NAMES only: which rows a request
+            // addressed and which columns it would set is the whole question after an unexplained write, and
+            // none of it requires carrying a quantity, a note or any other value.
+            routes_in_payload: (typeof sample.routes_in_payload === 'number') ? sample.routes_in_payload : null,
+            allocation_draft_id: sample.allocation_draft_id ? str(sample.allocation_draft_id) : null,
+            allocation_draft_line_ids: Array.isArray(sample.allocation_draft_line_ids) ? sample.allocation_draft_line_ids.map(str) : null,
+            changed_fields: Array.isArray(sample.changed_fields) ? sample.changed_fields.map(str) : null,
+            outcome: sample.outcome ? str(sample.outcome) : null,
+            external: true }, _extMarks));
         return true;
     }
 

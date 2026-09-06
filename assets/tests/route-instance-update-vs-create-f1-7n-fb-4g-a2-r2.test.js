@@ -816,12 +816,12 @@ mut('X8  ADDENDUM §4 an Add Route adopts a zero-line legacy header', function (
 
 mut('X9  ADDENDUM §3 a single-row event re-sends the whole route group', function () {
   var m = mutateFn(PAGE, '_flushDraftDbPersist',
-    // RESTATED (F1-7N-FC-1B-E3-R2): the anchor carried the exact three lines of the scoping expression, and
-    // R2 wraps it in parentheses and appends a `.filter` that keeps a COMPOSER out of the write scope in
-    // BOTH branches. ADDENDUM SECTN3's property is unchanged and is what this still mutates away: an event
-    // scopes the write to the rows it TOUCHED, so a refusal on one route can never reach another.
-    "        var _scoped = (_touched.length\n            ? rows.filter(function (r) { return _touchedSet[String(r.client_route_instance_id || '')]; })\n            : rows)",
-    "        var _scoped = (rows)");
+    // RESTATED AGAIN (R6-R6-R2): the anchor tracked a TWO-BRANCH expression whose second branch — an empty
+    // touched set widening to every row on screen — is gone. There is one branch now, which is what makes
+    // ADDENDUM SECTN3's property unconditional rather than true-unless-nobody-marked-anything. The mutation
+    // is the same one it always was: take the scope back to every row.
+    "        var _scoped = rows\n            .filter(function (r) { return _touchedSet[String(r.client_route_instance_id || '')]; })",
+    "        var _scoped = rows\n            .filter(function (r) { return true; })");
   var honest = code(extractFn(PAGE, '_flushDraftDbPersist'));
   var mutated = code(extractFn(m, '_flushDraftDbPersist'));
   return /_touchedSet\[String\(r\.client_route_instance_id/.test(honest) &&

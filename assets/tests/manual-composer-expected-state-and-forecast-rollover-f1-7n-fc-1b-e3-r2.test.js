@@ -485,10 +485,20 @@ function runAssertions() {
   section('§A — the mechanism, named where it lives');
   // ==============================================================================================================
   var flushFn = code(extractFn(PAGE, '_flushDraftDbPersist'));
-  ok(/\)\.filter\(function \(r\) \{ return !\(_irIsComposerRow_\(r\) && !_isRouteComplete\(r\)\); \}\)/.test(flushFn),
-    'A8  a composer leaves the write scope in BOTH branches, so the empty-touched-set fallback cannot readmit it');
-  ok(/_touched\.length$|_touched\.length\s*$|_touched\.length\r?\n/.test(flushFn) || /_touched\.length/.test(flushFn),
-    'A8a and the fallback itself is KEPT — _persistAllocationDraftToDb writes only because of it');
+  ok(/\.filter\(function \(r\) \{ return !\(_irIsComposerRow_\(r\) && !_isRouteComplete\(r\)\); \}\)/.test(flushFn),
+    'A8  a composer is filtered out of the write scope');
+  // R6-R6-R2 §3 — A8a ASSERTED THE FALLBACK IS KEPT, AND IT IS NOT. An empty touched set used to widen the
+  // scope to every row on screen, which is how one gesture on Route A wrote Route B on 2026-09-06. The
+  // composer guarantee this section is about did not weaken when it went; it got SHORTER. There is one
+  // branch, so 'a composer never enters the write scope' no longer needs the words 'in both branches'.
+  ok(!/\?\s*rows\)\.filter/.test(flushFn) && !/: rows\)/.test(flushFn),
+    'A8a and the empty-touched-set fallback is GONE — no dirty intent means zero mutation requests');
+  ok(/var _scoped = rows\s*\.filter\(function \(r\) \{ return _touchedSet\[/.test(flushFn),
+    'A8b the scope is the touched set and nothing else');
+  // The legacy caller still writes what it always wrote, by SAYING so rather than by leaving a set empty.
+  var legacyFn = code(extractFn(PAGE, '_persistAllocationDraftToDb'));
+  ok(/_irMarkRouteTouched_/.test(legacyFn) && /_isRouteComplete/.test(legacyFn),
+    'A8c and _persistAllocationDraftToDb DECLARES its scope instead of relying on the absence of one');
   ok(/_hintRows/.test(flushFn) && /composer_touched === true/.test(flushFn),
     'A9  §B.2 a touched composer is hinted from the WHOLE row set, not from the write scope');
   ok(flushFn.indexOf('_irShowDraftSaveError(sku, _irIncompleteRouteNotice_') === -1,
@@ -1116,8 +1126,9 @@ function runAssertions() {
     // The composer predicate appears TWICE in this function - once excluding composers from the WRITE SCOPE
     // and once selecting the touched ones to HINT - so "does this expression appear" cannot tell the mutant
     // from the original. The probe names the scope filter exactly.
-    var anchor = ').filter(function (r) { return !(_irIsComposerRow_(r) && !_isRouteComplete(r)); });';
-    var m = swap(FLUSH_SRC, anchor, ');');
+    // R6-R6-R2: the scope expression lost its parenthesised two-branch head, so the filter now begins a line.
+    var anchor = '            .filter(function (r) { return !(_irIsComposerRow_(r) && !_isRouteComplete(r)); });';
+    var m = swap(FLUSH_SRC, anchor, ';');
     return FLUSH_SRC.indexOf(anchor) !== -1 && m.indexOf(anchor) === -1;
   });
   // 2. the incomplete notice sent back to the failure renderer

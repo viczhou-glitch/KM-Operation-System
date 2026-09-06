@@ -67,7 +67,7 @@
 // §9 — THE CENSUS WAS REPORTING A BUILD IT NO LONGER WAS. Its behaviour changed in A2-R1-R1 (it learned to
 // read the harvest REFUSAL) and again in A2-R1-R2 (route intent + identity preview) while this literal stayed
 // at A2-R1, so a log could not be matched to the code that produced it. It moves with the file now.
-var TEMP_E3_CENSUS_BUILD_ = 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R6-R1-B1';
+var TEMP_E3_CENSUS_BUILD_ = 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R6-R2';
 
 /** Read-only row reader. The Sheet object stays inside this function — the caller gets values, never a writer. */
 // R6-R3 §2 — the OPTIONAL third argument is a metrics sink. §2 requires the diagnostic to report how many
@@ -3645,5 +3645,245 @@ function CENSUS_r6r6FinishBack_(out) {
   CENSUS_log_('r6r6_readback_counts', 'headers ' + out.header_count_before + '->' + out.header_count_after
     + ' lines ' + out.line_count_before + '->' + out.line_count_after);
   CENSUS_log_('r6r6_readback_db_writes', String(out.db_writes));
+  return out;
+}
+
+// ================================================================================================================
+// F1-7N-FC-1B-E3-R4-A2-R1-R6-R6-R2 §7/§8 — THE AFTER STATE, AND A REPAIR THAT IS DESIGNED AND NOT RUN.
+//
+// On 2026-09-06 one authorized edit wrote two routes. Route A's change was asked for; Route B's was not, and
+// nobody asked for it because nobody could see it — the derived last mile the lane supplied for a
+// one-profile service went into the same DOM field the collector reads as operator intent.
+//
+// These two entry points are READ ONLY. The first states what production holds now and classifies every
+// difference from the frozen BEFORE as AUTHORIZED or UNAUTHORIZED. The second DESIGNS the compensating
+// update and prints the exact body it would send. Neither writes. There is no third entry point that does,
+// and adding one is a separate decision with its own authorization.
+// ================================================================================================================
+
+// The unauthorized AFTER, exactly as the production evidence states it. Frozen for the same reason the BEFORE
+// is frozen: a repair that recomputes its own starting point cannot tell a fixed row from an unfixed one.
+var R6R6R2_ROUTE_B_UNAUTHORIZED_AFTER_ = {
+  allocation_draft_id: 'SADH-K4-A3872518',
+  allocation_draft_line_id: 'SADL-K2-344FB2B2',
+  last_mile_delivery: 'parcel',            // was BLANK; no operator chose this
+  draft_version: '2',                      // was 1
+  k4_group_key: '|resus|us|amazon|inventory_replenishment|wh-tw-cn-factory-youxin|warehouse|wh-resus-us-3pl-amzlgs|air|parcel|',
+  updated_at: '2026-09-06 08:28:04 +0800',
+  line_updated_at: '2026-09-06 08:28:04 +0800'
+};
+// Route A's AFTER, for contrast. It is not repaired and must not be: it is what the operator asked for.
+var R6R6R2_ROUTE_A_AUTHORIZED_AFTER_ = {
+  allocation_draft_id: 'SADH-K4-38523A90',
+  allocation_draft_line_id: 'SADL-K2-92B8BAD2',
+  last_mile_delivery: 'truck',
+  draft_version: '2',
+  k4_group_key: '|resus|us|amazon|inventory_replenishment|wh-tw-cn-factory-youxin|marketplace|amazon|sea_express|truck|',
+  updated_at: '2026-09-06 08:27:53 +0800',
+  line_updated_at: '2026-09-06 08:27:53 +0800'
+};
+// The ONLY field the repair may move. `k4_group_key` follows from it by derivation, and the version follows
+// from the write itself; neither is set by hand. Everything else on the row is already correct.
+var R6R6R2_REPAIRABLE_FIELDS_ = ['last_mile_delivery'];
+
+function CENSUS_r6r6r2FindRow_(rows, headerId, lineId) {
+  for (var i = 0; i < (rows || []).length; i++) {
+    if (CENSUS_str_(rows[i].allocation_draft_id) === CENSUS_str_(headerId) &&
+        CENSUS_str_(rows[i].allocation_draft_line_id) === CENSUS_str_(lineId)) return rows[i];
+  }
+  return null;
+}
+// Every field of a frozen record compared against the live row, through the SAME comparison core the readback
+// and the readiness use — so 'unchanged' means one thing across all four entry points.
+function CENSUS_r6r6r2Classify_(frozenBefore, live, authorizedFields) {
+  var fields = R6R6_FORBIDDEN_MUTATION_FIELDS_.concat(R6R6_DERIVED_MUTATION_FIELDS_)
+    .concat(['last_mile_delivery', 'expected_arrival', 'draft_version']).concat(R6R6_TIMESTAMP_FIELDS_);
+  var authorized = [], unauthorized = [], uncompared = [];
+  var ok = {}; (authorizedFields || []).forEach(function (k) { ok[k] = 1; });
+  for (var i = 0; i < fields.length; i++) {
+    var k = fields[i];
+    var bv = (k === 'draft_version' && (frozenBefore[k] === null || frozenBefore[k] === undefined))
+      ? frozenBefore.expected_draft_version : frozenBefore[k];
+    if (bv === null || bv === undefined) { uncompared.push(k); continue; }
+    var cmp = CENSUS_r6r6Cmp_(k, bv, live[k]);
+    if (cmp.equal) continue;
+    (ok[k] ? authorized : unauthorized).push({ field: k, before: cmp.frozen, after: cmp.live });
+  }
+  return { authorized: authorized, unauthorized: unauthorized, uncompared: uncompared };
+}
+
+// ----------------------------------------------------------------------------------------------------------------
+// §7 — WHAT PRODUCTION HOLDS NOW. Read-only. Run it before anything else.
+// ----------------------------------------------------------------------------------------------------------------
+function RUN_R6R6R2_AFTER_STATE_CENSUS() {
+  var out = {
+    census: 'RUN_R6R6R2_AFTER_STATE_CENSUS',
+    build: TEMP_E3_CENSUS_BUILD_,
+    read_only: true, db_writes: 0, writer_constructed: false, submit_calls: 0, reservation_writes: 0,
+    carrier_master_data_writes: 0,
+    route_a: null, route_b: null,
+    unauthorized_field_count: 0,
+    eta_persisted_anywhere: null,
+    verdict: 'STOP', stop_reason: ''
+  };
+  var res = RUN_R6R2_ROUTE_PROVENANCE();
+  if (res.error) { out.stop_reason = 'the census itself failed: ' + CENSUS_str_(res.error); return CENSUS_r6r6r2Finish_(out); }
+  out.db_writes = CENSUS_num_(res.db_writes) || 0;
+  out.writer_constructed = res.writer_constructed === true;
+  var rows = res.visible_route_rows || [];
+  var snap = R6R6_FROZEN_BEFORE_;
+  var bFrozen = (snap.other_rows || [])[0] || {};
+
+  // ROUTE A — the authorized change. last_mile, the key it derives, the version and the two timestamps are
+  // all expected to have moved; anything else is not.
+  var a = CENSUS_r6r6r2FindRow_(rows, snap.allocation_draft_id, snap.allocation_draft_line_id);
+  if (!a) { out.stop_reason = 'Route A is not present in production.'; return CENSUS_r6r6r2Finish_(out); }
+  var ca = CENSUS_r6r6r2Classify_(snap, a,
+    ['last_mile_delivery', 'k4_group_key', 'draft_version', 'updated_at', 'line_updated_at']);
+  out.route_a = {
+    allocation_draft_id: CENSUS_str_(a.allocation_draft_id), allocation_draft_line_id: CENSUS_str_(a.allocation_draft_line_id),
+    last_mile_delivery: CENSUS_str_(a.last_mile_delivery), draft_version: CENSUS_str_(a.draft_version),
+    k4_group_key: CENSUS_str_(a.k4_group_key), expected_arrival: CENSUS_str_(a.expected_arrival),
+    updated_at: CENSUS_str_(a.updated_at), line_updated_at: CENSUS_str_(a.line_updated_at),
+    status: CENSUS_str_(a.status), ownership: CENSUS_str_(a.ownership),
+    authorized_changes: ca.authorized, unauthorized_changes: ca.unauthorized,
+    matches_expected_after: CENSUS_str_(a.last_mile_delivery).toLowerCase() === 'truck'
+      && CENSUS_str_(a.draft_version) === '2'
+  };
+
+  // ROUTE B — NOTHING was authorized here, so the authorized set is EMPTY. Every difference is a finding.
+  var b = CENSUS_r6r6r2FindRow_(rows, bFrozen.allocation_draft_id, bFrozen.allocation_draft_line_id);
+  if (!b) { out.stop_reason = 'Route B is not present in production.'; return CENSUS_r6r6r2Finish_(out); }
+  var cb = CENSUS_r6r6r2Classify_(bFrozen, b, []);
+  out.route_b = {
+    allocation_draft_id: CENSUS_str_(b.allocation_draft_id), allocation_draft_line_id: CENSUS_str_(b.allocation_draft_line_id),
+    last_mile_delivery: CENSUS_str_(b.last_mile_delivery), draft_version: CENSUS_str_(b.draft_version),
+    k4_group_key: CENSUS_str_(b.k4_group_key), expected_arrival: CENSUS_str_(b.expected_arrival),
+    updated_at: CENSUS_str_(b.updated_at), line_updated_at: CENSUS_str_(b.line_updated_at),
+    status: CENSUS_str_(b.status), ownership: CENSUS_str_(b.ownership),
+    authorized_changes: [], unauthorized_changes: cb.unauthorized,
+    matches_expected_after: CENSUS_str_(b.last_mile_delivery).toLowerCase() === 'parcel'
+      && CENSUS_str_(b.draft_version) === '2'
+  };
+  out.unauthorized_field_count = cb.unauthorized.length + ca.unauthorized.length;
+
+  // §6 — THE ETA, STATED FROM THE DATABASE RATHER THAN FROM THE SCREEN. buildDraftLinePayload does not send
+  // expected_arrival and says why; a blank column is therefore the CORRECT state, not a lost write, and the
+  // date the UI shows is computed at render. This reports the fact so §8 does not have to assume it.
+  out.eta_persisted_anywhere = !!(CENSUS_str_(a.expected_arrival) || CENSUS_str_(b.expected_arrival));
+
+  out.verdict = 'AFTER_STATE_REPORTED';
+  return CENSUS_r6r6r2Finish_(out);
+}
+
+// ----------------------------------------------------------------------------------------------------------------
+// §8 — THE COMPENSATING REPAIR, DESIGNED AND NOT EXECUTED.
+//
+// FORWARD ONLY. The row is not deleted, the version is not decremented and no history is rewritten: an
+// unauthorized write is a fact that happened, and the repair is another fact that happens after it. Version 2
+// becomes 3. Anyone reading the row later sees both events, which is the point.
+//
+// THE TARGET STATE IS THE FROZEN BEFORE. Not a recomputed one — the value Route B held before the incident is
+// in R6R6_FROZEN_BEFORE_.other_rows[0], captured while the row was still correct, and restoring to anything
+// else would be restoring to a guess.
+// ----------------------------------------------------------------------------------------------------------------
+function RUN_R6R6R2_ROUTE_B_REPAIR_MANIFEST() {
+  var out = {
+    census: 'RUN_R6R6R2_ROUTE_B_REPAIR_MANIFEST',
+    build: TEMP_E3_CENSUS_BUILD_,
+    read_only: true, db_writes: 0, writer_constructed: false, submit_calls: 0, reservation_writes: 0,
+    executed: false,                       // ALWAYS false. This entry point has no write path at all.
+    target: null, preflight: [], manifest: null, readback_contract: null,
+    eta_treatment: null,
+    verdict: 'STOP', stop_reason: ''
+  };
+  var bFrozen = (R6R6_FROZEN_BEFORE_.other_rows || [])[0] || {};
+  var expectAfter = R6R6R2_ROUTE_B_UNAUTHORIZED_AFTER_;
+  out.target = { allocation_draft_id: expectAfter.allocation_draft_id,
+    allocation_draft_line_id: expectAfter.allocation_draft_line_id };
+
+  var res = RUN_R6R2_ROUTE_PROVENANCE();
+  if (res.error) { out.stop_reason = 'the census itself failed: ' + CENSUS_str_(res.error); return CENSUS_r6r6r2Finish_(out); }
+  out.db_writes = CENSUS_num_(res.db_writes) || 0;
+  var b = CENSUS_r6r6r2FindRow_(res.visible_route_rows || [], expectAfter.allocation_draft_id,
+    expectAfter.allocation_draft_line_id);
+
+  // PREFLIGHT. Every one of these is a reason NOT to write, checked before a body is even shaped.
+  if (!b) out.preflight.push('the target row is not present in production');
+  if (b && CENSUS_str_(b.draft_version) !== CENSUS_str_(expectAfter.draft_version)) {
+    out.preflight.push('draft_version is ' + CENSUS_str_(b.draft_version) + ', and the manifest expects '
+      + expectAfter.draft_version + '. Something has written to this row since the incident was measured.');
+  }
+  if (b && CENSUS_str_(b.last_mile_delivery).toLowerCase() !== CENSUS_str_(expectAfter.last_mile_delivery).toLowerCase()) {
+    out.preflight.push('the last mile is "' + CENSUS_str_(b.last_mile_delivery) + '", not the unauthorized "'
+      + expectAfter.last_mile_delivery + '". This row is not in the state the repair was designed for '
+      + '(it may already have been repaired, or changed again).');
+  }
+  if (b) {
+    // The repair must not travel further than the one field. Any OTHER difference from the frozen BEFORE is
+    // outside what was measured, and a repair that carries an unmeasured change is a second unauthorized write.
+    var cls = CENSUS_r6r6r2Classify_(bFrozen, b,
+      ['last_mile_delivery', 'k4_group_key', 'draft_version', 'updated_at', 'line_updated_at']);
+    for (var i = 0; i < cls.unauthorized.length; i++) {
+      out.preflight.push('an unmeasured difference on ' + cls.unauthorized[i].field + ': frozen "'
+        + cls.unauthorized[i].before + '" vs live "' + cls.unauthorized[i].after + '"');
+    }
+  }
+
+  // THE MANIFEST. Shaped whether or not the preflight passed, because a refusal an operator cannot read is
+  // not a refusal they can act on — but `ready_to_execute` is the only field that authorizes anything.
+  out.manifest = {
+    intent: 'UPDATE_EXISTING_ROUTE',
+    reason: 'compensating repair of an unauthorized write on 2026-09-06 08:28:04 +0800',
+    action: 'upsertShippingAllocationDraftAtomic',
+    allocation_draft_id: expectAfter.allocation_draft_id,
+    expected_draft_version: CENSUS_str_(expectAfter.draft_version),   // OPTIMISTIC GUARD: 2, and the write makes it 3
+    create_idempotency_key: '',                                       // an UPDATE mints nothing
+    fields_to_restore: [
+      { field: 'last_mile_delivery', from: CENSUS_str_(expectAfter.last_mile_delivery),
+        to: CENSUS_str_(bFrozen.last_mile_delivery),
+        authority: 'R6R6_FROZEN_BEFORE_.other_rows[0], captured while the row was still correct' }
+    ],
+    fields_derived_by_the_server: [
+      { field: 'k4_group_key', to: CENSUS_r6r6K4WithLastMile_(CENSUS_str_(expectAfter.k4_group_key),
+        CENSUS_str_(bFrozen.last_mile_delivery)), note: 'derived from the last mile; never sent by hand' },
+      { field: 'draft_version', to: '3', note: 'the writer advances it by exactly one; never set, never decremented' },
+      { field: 'updated_at / line_updated_at', to: '(the repair time)', note: 'a repair is a write and moves them' }
+    ],
+    fields_explicitly_untouched: ['quantity', 'shipping_method', 'destination_kind', 'destination_id',
+      'source_warehouse_id', 'status', 'generation_type', 'ownership', 'expected_arrival', 'line_status'],
+    forbidden: ['delete the row', 'decrement draft_version', 'rewrite updated_at to its pre-incident value',
+      'soft-cancel and recreate the line', 'touch Route A']
+  };
+
+  // §6 DECIDES THIS, AND THE ANSWER IS: DO NOTHING. buildDraftLinePayload deliberately does not send
+  // expected_arrival — the base date (a planned ship date) and the Receiving Buffer that CARRIER_AND_ROUTE_SPEC
+  // §5B requires do not exist in any table — so a blank column is the CORRECT persisted state and the date the
+  // UI shows is computed at render time. There is nothing to restore, and writing one now would freeze the
+  // very substitution the spec refuses to freeze.
+  out.eta_treatment = {
+    verdict: 'NO_ETA_ACTION',
+    because: 'expected_arrival is not persisted by design (buildDraftLinePayload §E); blank is correct',
+    live_route_b_expected_arrival: b ? CENSUS_str_(b.expected_arrival) : null
+  };
+
+  out.readback_contract = {
+    before_execution: 'RUN_R6R6R2_ROUTE_B_REPAIR_MANIFEST must report ready_to_execute true',
+    after_execution: 'RUN_R6R6R2_AFTER_STATE_CENSUS must report route_b.last_mile_delivery "" and draft_version 3',
+    stop_if: 'any other field of Route B differs from the frozen BEFORE, or Route A moved at all'
+  };
+
+  out.ready_to_execute = (out.preflight.length === 0);
+  out.verdict = out.ready_to_execute ? 'REPAIR_DESIGNED_NOT_EXECUTED' : 'STOP';
+  if (!out.ready_to_execute) out.stop_reason = 'the repair is NOT applicable as designed: ' + out.preflight.join('; ');
+  return CENSUS_r6r6r2Finish_(out);
+}
+
+function CENSUS_r6r6r2Finish_(out) {
+  out.read_only = true;
+  out.db_writes = CENSUS_num_(out.db_writes) || 0;
+  out.writer_constructed = out.writer_constructed === true;
+  CENSUS_log_('r6r6r2_verdict', out.census + ' ' + out.verdict + (out.stop_reason ? ' — ' + out.stop_reason : ''));
+  CENSUS_log_('r6r6r2_db_writes', String(out.db_writes));
   return out;
 }

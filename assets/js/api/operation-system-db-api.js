@@ -3754,14 +3754,59 @@ function _kmClassifyAnswer_(action, kind, resp, text, requestedUrl) {
 }
 // F1-7N-FB-4E §E — report one request's outcome to the shared metric. Duration, bytes and a code; never a URL,
 // a payload or a row. Wrapped so a missing transport module can never break a read.
-function _kmReportSample_(action, kind, startedAt, code, phase, bytes) {
+function _kmReportSample_(action, kind, startedAt, code, phase, bytes, extra) {
     try {
         if (typeof window !== 'undefined' && window.KM && window.KM.transport && typeof window.KM.transport.recordExternal === 'function') {
-            window.KM.transport.recordExternal({ action: action, kind: kind, code: code || null, phase: phase || null,
-                ms: (startedAt ? (Date.now() - startedAt) : 0), bytes: bytes || 0 });
+            var s = { action: action, kind: kind, code: code || null, phase: phase || null,
+                ms: (startedAt ? (Date.now() - startedAt) : 0), bytes: bytes || 0 };
+            if (extra) { for (var k in extra) { if (Object.prototype.hasOwnProperty.call(extra, k)) s[k] = extra[k]; } }
+            window.KM.transport.recordExternal(s);
         }
     } catch (e) { /* observation must never affect the read */ }
 }
+
+// F1-7N-FC-1B-E3-R4-A2-R1-R6-R6-R2 §5 — WHAT A MUTATION REQUEST WOULD CHANGE, WITHOUT ITS VALUES.
+//
+// After the 2026-09-06 incident the question was not 'did a request fail?' — every request succeeded. It was
+// 'which ROWS did the page address, and which COLUMNS was it setting?', and nothing recorded that. Identities,
+// counts and field NAMES answer it completely. A quantity, a note or an override reason answers nothing extra
+// and is the sort of thing a diagnostic log has no business carrying, so none of them are read here.
+function _kmMutationShape_(command, payload) {
+    var out = { routes_in_payload: null, allocation_draft_id: null, allocation_draft_line_ids: null,
+        changed_fields: null };
+    try {
+        var p = payload || {};
+        var h = p.header || null;
+        var lines = Array.isArray(p.lines) ? p.lines : (p.line ? [p.line] : []);
+        var names = {};
+        if (h) {
+            out.allocation_draft_id = String(h.allocation_draft_id || p.allocation_draft_id || '') || null;
+            Object.keys(h).forEach(function (k) { if (h[k] !== undefined) names[k] = 1; });
+        } else if (p.allocation_draft_id) {
+            out.allocation_draft_id = String(p.allocation_draft_id);
+        }
+        if (lines.length) {
+            out.routes_in_payload = lines.length;
+            out.allocation_draft_line_ids = lines.map(function (l) { return String((l && l.allocation_draft_line_id) || '(new)'); });
+            lines.forEach(function (l) { Object.keys(l || {}).forEach(function (k) { if (l[k] !== undefined) names['line.' + k] = 1; }); });
+        }
+        var ks = Object.keys(names);
+        if (ks.length) out.changed_fields = ks.sort();
+    } catch (e) { /* a diagnostic that can throw is worse than one that is silent */ }
+    return out;
+}
+// A client-side correlation id for a WRITE. Reads carry km_rid in the URL and the router echoes it; the POST
+// path has no such field (01_router reads km_rid from e.parameter only), so this id correlates the dispatch,
+// the settle and the outcome WITHIN THIS BROWSER and is honestly labelled as doing only that. Giving a write
+// a server-echoed id means changing the POST contract and re-deploying the router, which is a decision of its
+// own and is deliberately not smuggled into an incident repair.
+function _kmWithOutcome_(shape, outcome) {
+    var o = {}; for (var k in shape) { if (Object.prototype.hasOwnProperty.call(shape, k)) o[k] = shape[k]; }
+    o.outcome = outcome;
+    return o;
+}
+var _KM_WRITE_RID_SEQ_ = 0;
+function _kmNextWriteRequestId_() { _KM_WRITE_RID_SEQ_++; return 'REQ-W' + ('000000' + _KM_WRITE_RID_SEQ_).slice(-6) + '-C'; }
 // The safe operator-facing sentence for a typed transport failure. No URL beyond the masked identity, no body.
 function _kmTypedTransportMessage_(action, cls) {
     var t = cls.typed || {}, w = cls.wire || {};
@@ -4413,6 +4458,21 @@ async function _kmWeeklyCommand_(command, payload) {
     var url = (window.KM && window.KM.DB && typeof window.KM.DB.getApiBaseUrl === 'function' && window.KM.DB.getApiBaseUrl()) || OP_DB_API_BASE_URL;
     var resp;
     var _tw0 = Date.now();
+    // §5 — the shape and the id are computed BEFORE dispatch, so a request that never comes back is still
+    // reported as a request that was SENT. That is the case the incident turned on.
+    //
+    // Resolved defensively, and for a reason this file has been bitten by before: this runs OUTSIDE the
+    // try/catch below, so a helper that is not in scope would throw ahead of the fetch and turn a REPORTING
+    // gap into a FAILED SAVE. An observation that can cancel the thing it observes is not an observation.
+    var _wshape = {};
+    try {
+        if (typeof _kmMutationShape_ === 'function') _wshape = _kmMutationShape_(command, payload);
+        if (typeof _kmNextWriteRequestId_ === 'function') _wshape.request_id = _kmNextWriteRequestId_();
+    } catch (eShape) { _wshape = {}; }
+    function _wOut(outcome) {
+        try { return (typeof _kmWithOutcome_ === 'function') ? _kmWithOutcome_(_wshape, outcome) : null; }
+        catch (eOut) { return null; }
+    }
     try {
         // F1-7N-FB-3 §D — bounded. An expired WRITE is INDETERMINATE, never "nothing was written": the server
         // may have committed after we stopped listening, so it is reported as such and never auto-retried.
@@ -4421,11 +4481,18 @@ async function _kmWeeklyCommand_(command, payload) {
     } catch (netErr) {
         if (netErr && netErr.kmTimeout) {
             var te = _kmTimeoutError_(command, 'write', netErr.timeoutMs);
+            // §5 — A WRITE THAT TIMED OUT IS THE MOST IMPORTANT ROW IN THE TIMELINE, and it used to be the one
+            // row that never got there: this path returned before the reporter was ever reached. An
+            // unacknowledged write is exactly what ACK_UNKNOWN is about, so it is recorded as such.
+            try { _kmReportSample_(command, 'write', _tw0, te.code, 'TIMEOUT', 0,
+                _wOut('ACK_UNKNOWN')); } catch (e) {}
             return _kmCmdErr_(command, te.code, te.message, te.details);
         }
         // Network/redirect failure with NO acknowledged response → transport error (not an ack of a commit).
         // §D — how long the browser waited, and that nothing came back at all, are the two facts that separate
         // "the network dropped" from "the server was still working". Both were previously discarded.
+        try { _kmReportSample_(command, 'write', _tw0, 'HTTP_TRANSPORT_ERROR', 'DISPATCH', 0,
+            _wOut('ACK_UNKNOWN')); } catch (e) {}
         return _kmCmdErr_(command, 'HTTP_TRANSPORT_ERROR', 'Network error: ' + (netErr && netErr.message ? netErr.message : netErr),
             { command: command, elapsed_ms: Date.now() - _tw0, http_status: null, raw_present: false,
               response_is_json: false, timeout_ms: _kmTimeoutMs_('write') });
@@ -4435,7 +4502,8 @@ async function _kmWeeklyCommand_(command, payload) {
     // F1-7N-FB-4E §A — the same single classification for the write path. The legacy code and message shape are
     // unchanged (the write barriers and the INDETERMINATE set key on them); the typed evidence rides alongside.
     var _wcls = _kmClassifyAnswer_(command, 'write', resp, text, url);
-    try { if (typeof _kmReportSample_ === 'function') _kmReportSample_(command, 'write', _tw0, _wcls.ok ? null : _wcls.typed.code, _wcls.ok ? 'SUCCESS' : _wcls.typed.phase, String(text || '').length); } catch (e) {}
+    try { if (typeof _kmReportSample_ === 'function') _kmReportSample_(command, 'write', _tw0, _wcls.ok ? null : _wcls.typed.code, _wcls.ok ? 'SUCCESS' : _wcls.typed.phase, String(text || '').length,
+        _wOut(_wcls.ok ? 'ANSWERED' : 'REFUSED')); } catch (e) {}
     if (!_wcls.ok) {
         return _kmCmdErr_(command, _wcls.legacyCode,
             _wcls.legacyCode === 'HTTP_TRANSPORT_ERROR' ? 'API HTTP ' + resp.status : 'Non-JSON response from Web App',

@@ -1026,6 +1026,11 @@ ok(/function TEMP_AI_PLAN_ACTIVATION_CENSUS_FC1B_E3\(args\)/.test(TEMP), 'F1  th
   // third entry point that performs the production write.
   var ALLOWED_ENTRY_POINTS = ['RUN_E3_CENSUS_RESUS_US_AMAZON_CO1100R', 'RUN_E3_CENSUS_SELECTED_MATERIALIZABLE_SCOPE',
     'RUN_E3_FIND_MATERIALIZABLE_CANDIDATE', 'RUN_R6R2_ROUTE_PROVENANCE', 'RUN_R6R4_SAVE_TARGET_FREEZE',
+    // R6-R6-R2 adds the incident pair: what production holds NOW, and the compensating repair for Route B
+    // DESIGNED rather than run. Both are read-only and take no arguments; the second has no write path at
+    // all, which is asserted in its own suite rather than left to this list to imply. They sit HERE because
+    // the list is compared sorted and '_' sorts after 'R', so RUN_R6R6R2_* precedes every RUN_R6R6_*.
+    'RUN_R6R6R2_AFTER_STATE_CENSUS', 'RUN_R6R6R2_ROUTE_B_REPAIR_MANIFEST',
     // R6-R6-R1 adds the two no-argument entry points the editor can actually run: the pre-write readiness
     // verdict and the frozen readback. Listed in SORTED order, because the assertion compares sorted lists.
     'RUN_R6R6_MANUAL_ROUTE_SAVE_FROZEN_READINESS',
