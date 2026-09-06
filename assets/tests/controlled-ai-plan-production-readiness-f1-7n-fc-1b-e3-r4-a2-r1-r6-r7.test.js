@@ -79,6 +79,9 @@ var G00 = read('assets/specs/active/apps-script/00_config.gs');
 var G16 = read('assets/specs/active/apps-script/16_shipping_allocation_handlers.gs');
 var G13 = read('assets/specs/active/apps-script/13_procurement_handlers.gs');
 var G43 = read('assets/specs/active/apps-script/43_api_v1_gap_materialization.gs');
+// R3-P1 — the full-row snapshot normalizes an INSTANT column through the project's existing cell
+// normalizer rather than a second timestamp parser of its own. That normalizer lives in 41_.
+var G41 = read('assets/specs/active/apps-script/41_shipping_allocation_schema_audit.gs');
 var GLOBAL_G61 = read('assets/specs/active/apps-script/61_api_v1_weekly_ai_plan.gs');
 var G61 = GLOBAL_G61;
 var G69 = read('assets/specs/active/apps-script/69_api_v1_route_identity_contract.gs');
@@ -142,7 +145,10 @@ var SAD_CONSTS = ['SHIPPING_ALLOCATION_DRAFTS_HEADERS_', 'SAD_LIFECYCLE_TAIL_COL
   'SAD_ROUTE_IDENTITY_TAIL_COLUMNS_', 'SAD_CREATE_IDEMPOTENCY_TAIL_COLUMNS_', 'SAD_HEADER_OPTIONAL_TAIL_COLUMNS_',
   'SHIPPING_ALLOCATION_DRAFTS_HEADERS_FULL_', 'SAD_SCHEMA_GENERATIONS_', 'SAD_AI_K2_INTENT_', 'SAD_ROUTE_INTENTS_',
   'SAD_CLIENT_GRANTABLE_INTENTS_', 'SHIPPING_ALLOCATION_DRAFT_LINES_HEADERS_',
-  'SAD_LINE_ETA_TAIL_COLUMNS_', 'SAD_STATUSES_', 'SAD_TERMINAL_STATUSES_', 'SAD_TERMINAL_LINE_STATUSES_',
+  'SAD_LINE_ETA_TAIL_COLUMNS_', 'SHIPPING_ALLOCATION_DRAFT_LINES_HEADERS_FULL_',
+  // R3-P1 — the two field-class authorities the full-row normalizer reads to decide DAY / NUMERIC / text.
+  'SAD_K2_FP_DATE_FIELDS_', 'SAD_K2_FP_NUMERIC_FIELDS_',
+  'SAD_STATUSES_', 'SAD_TERMINAL_STATUSES_', 'SAD_TERMINAL_LINE_STATUSES_',
   'SAD_GENERATION_TYPES_', 'SAD_RECOMMENDATION_FIELDS_', 'SAD_LINE_LEGACY_ALIASES_', 'SAD_K2_GROUP_DIMENSIONS_',
   'SAD_LINE_IDENTITY_FIELDS_'];
 var SAD_FNS = ['sadApplyLineAliases_', 'sadFnv1a_', 'sadFpVal_', 'sadLineNaturalKey_', 'sadDeterministicLineId_',
@@ -150,7 +156,13 @@ var SAD_FNS = ['sadApplyLineAliases_', 'sadFnv1a_', 'sadFpVal_', 'sadLineNatural
   'sadLiveHeaderNames_', 'sadHasColumn_', 'sadDestinationIdentity_', 'sadHeaderRouteIsComplete_',
   'sadReadActiveHeaderRows_', 'sadRowToObject_', 'sadReadLinesForDraft_', 'sadK4SchemaReady_',
   'sadK4ResolveActiveDraft_', 'sadResolveHeaderSchema_', 'sadDraftsSchemaReason_',
-  'sadSchemaGenerationColumns_', 'sadSupportedSchemaVersions_'];
+  'sadSchemaGenerationColumns_', 'sadSupportedSchemaVersions_',
+  // R3-P1 — the line-side schema gate and the day/numeric normalizers. No second parser is written
+  // anywhere; the census reaches these.
+  'sadExactSchemaReason_', 'sadCanonDate_', 'sadFpNorm_'];
+// 41_ owns the INSTANT normalizer: a Date becomes its epoch, so a timezone display string cannot read as
+// a change. It is a separate file, so it is injected separately and its absence is a testable state.
+var SAD41_FNS = ['sadAuditNormCell_'];
 var AIPL_CONSTS = ['AIPL_CONTRACT_VERSION_', 'AIPL_SOURCE_PAGE_', 'AIPL_EXPIRATION_REASON_',
   'AIPL_AUDIT_COLUMNS_', 'AIPL_MIGRATION_VERSION_', 'AIPL_SCHEMA_NOT_READY_', 'AIPL_COLLISION_CODE_',
   'AIPL_SUPPRESSED_CODE_', 'AIPL_AI_GENERATION_TYPES_', 'AIPL_PROTECTED_STATUSES_'];
@@ -335,6 +347,7 @@ function World(over, censusSrc, g61Src) {
   vm.runInContext('var SHIPPING_ALLOCATION_DRAFT_LINES_HEADERS_FULL_ = '
     + 'SHIPPING_ALLOCATION_DRAFT_LINES_HEADERS_.concat(SAD_LINE_ETA_TAIL_COLUMNS_);', ctx);
   vm.runInContext(SAD_FNS.map(function (f) { return extractFn(G16, f); }).join(NL), ctx);
+  if (!over.drop41) vm.runInContext(SAD41_FNS.map(function (f) { return extractFn(G41, f); }).join(NL), ctx);
   vm.runInContext(censusSrc || CENSUS, ctx);
   // The E3 activation census reaches the whole harvest, which is a different suite's subject. What R6-R7
   // consumes from it is the ALLOCATOR RESULT, so that is what is supplied — the proposed groups, in the

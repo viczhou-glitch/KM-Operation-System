@@ -115,6 +115,34 @@ function labels(w) {
 }
 function proofOf(r) { var s = lineOf(r.world, 'r6r7_proof'); return s === null ? null : JSON.parse(s); }
 
+// extractVar stops at the first closing bracket, which was enough while a snippet was one array literal.
+// R3-P1 composes them — a shared body wrapped twice — so the whole STATEMENT has to come across or the
+// suite would be testing three header lines and calling it a snippet.
+function extractStmt(src, name) {
+  var m = new RegExp('var ' + name + '\\s*=').exec(src);
+  if (!m) throw new Error('not found: ' + name);
+  var i = src.indexOf('=', m.index) + 1, d = 0, q = null;
+  for (; i < src.length; i++) {
+    var ch = src[i];
+    if (q) { if (ch === '\\') { i++; continue; } if (ch === q) q = null; continue; }
+    if (ch === "'" || ch === '"') { q = ch; continue; }
+    if (ch === '(' || ch === '[' || ch === '{') d++;
+    else if (ch === ')' || ch === ']' || ch === '}') d--;
+    else if (ch === ';' && d === 0) return src.slice(m.index, i + 1);
+  }
+  throw new Error('unterminated: ' + name);
+}
+// A published snippet, built exactly the way the census builds it — dependencies and all, so a snippet
+// that only works because of something the suite supplied would fail here rather than in a console.
+function snippet(name) {
+  var deps = ['R6R7_CAPTURE_TIMEOUT_MS_', 'R6R7_DELTA_BODY_LINES_']
+    .filter(function (d) { return d !== name; })
+    .map(function (d) { return extractStmt(CENSUS, d); }).join(NLF);
+  var v = vm.runInNewContext(deps + NLF + extractStmt(CENSUS, name) + NLF + name);
+  if (typeof v !== 'string' || v.length < 40) throw new Error(name + ' is no longer a built snippet');
+  return v;
+}
+
 // FREEZING, THE WAY A PERSON DOES IT: run the manifest, take its frozen_before, paste it into the constant.
 // Modelled exactly — the readback is then run in a world whose constant carries those values.
 function freezeFrom(over, opts) {
@@ -124,10 +152,36 @@ function freezeFrom(over, opts) {
   return { before: b, source: '(function(){ var B = R6R7_NO_ACTION_BEFORE_; var F = ' + JSON.stringify(b)
     + "; Object.keys(F).forEach(function(k){ if (k !== 'route_a' && k !== 'route_b') B[k] = F[k]; }); })();" };
 }
+// R3-P1 — THE BROWSER AUDIT A PERSON PASTES BACK IN. The readback needs three separately-sourced objects
+// and can only measure two of them, so the third arrives as a pasted constant. It is supplied by default
+// here so the database assertions below still mean what they meant in R3; the states where it is ABSENT
+// get their own cases rather than being the accidental default of every other test.
+var CLEAN_AUDIT = {
+  captured: true, resolved_or_rejected: 'resolved', action: 'weeklyAiPlan.generate',
+  response_outcome: 'AI_PLAN_NO_ACTION', response_code: 'NO_REPLENISHMENT_REQUIRED',
+  no_action_reason: 'VALID_ZERO_RECOMMENDATION', recommendation_state: 'VALID_ZERO',
+  recommended_qty: 0, qualifying_planned_qty: 520, residual_qty: 0,
+  created_headers: 0, created_lines: 0, updated_headers: 0, updated_lines: 0,
+  cancelled_headers: 0, cancelled_lines: 0, reservations: 0,
+  db_writes: 0, writer_reached: false, routes_count: 0, groups_count: 0, error_code: null,
+  baseline_max_seq: 3, new_requests: 1, new_mutation_requests: 1,
+  generation_requests: 1, exactly_one_generation_request: true, unexpected_mutations: [],
+  route_save_requests: 0, submit_requests: 0, reservation_requests: 0,
+  capture_installed: true, capture_calls: 1, capture_restored: true, capture_blocked_second_call: false,
+  audit_verdict: 'ONE_GENERATION_REQUEST_AND_RESPONSE_CAPTURED'
+};
+function auditSrc(over) {
+  var a = {};
+  Object.keys(CLEAN_AUDIT).forEach(function (k) { a[k] = CLEAN_AUDIT[k]; });
+  Object.keys(over || {}).forEach(function (k) { a[k] = over[k]; });
+  return '(function(){ var T = R6R7_ACTUAL_BROWSER_RESPONSE_; var A = ' + JSON.stringify(a)
+    + '; Object.keys(A).forEach(function(k){ T[k] = A[k]; }); })();';
+}
 function readback(frozen, over, opts) {
   opts = opts || {};
+  var aud = opts.noAudit ? '' : auditSrc(opts.audit);
   var o = { deployment: opts.deployment, projection: opts.projection, flagTrue: opts.flagTrue,
-    allowlist: opts.allowlist, census: opts.census, after: frozen.source + (opts.after || '') };
+    allowlist: opts.allowlist, census: opts.census, after: frozen.source + aud + (opts.after || '') };
   return runIt('RUN_R6R7_CONTROLLED_NO_ACTION_READBACK', over, o);
 }
 
@@ -183,6 +237,7 @@ ok(FPF.indexOf('draft_version') >= 0 && FPF.indexOf('updated_at') >= 0 && FPF.in
   'A14 the fingerprint covers version, both timestamps, quantity, last mile and provenance');
 var FP = vm.runInNewContext(extractFn(CENSUS, 'CENSUS_fp_') + NLF
   + 'function CENSUS_str_(v) { return String(v == null ? "" : v).trim(); }' + NLF
+  + extractVar(CENSUS, 'R6R7_SEP_') + NLF
   + extractVar(CENSUS, 'R6R7_FP_FIELDS_') + NLF
   + extractFn(CENSUS, 'CENSUS_r6r7RouteFingerprint_') + NLF
   + '({ fp: CENSUS_r6r7RouteFingerprint_ })');
@@ -285,7 +340,8 @@ section('C — the readback refuses to prove stillness against a baseline nobody
 // ================================================================================================================
 
 var C0 = runIt('RUN_R6R7_CONTROLLED_NO_ACTION_READBACK');
-eq(C0.res.verdict, 'STOP', 'C1  an unfrozen baseline STOPS');
+eq(C0.res.verdict, 'BASELINE_NOT_FROZEN',
+  'C1  an unfrozen baseline refuses under its own name, not a generic STOP');
 eq(C0.res.baseline_frozen, false, 'C1a baseline_frozen false');
 ok(C0.res.baseline_missing.length > 0, 'C1b with every missing field named');
 ok(String(C0.res.stop_reason).indexOf('BASELINE_NOT_FROZEN') === 0, 'C1c under its own code');
@@ -312,21 +368,21 @@ eq(C.res.routes_observed.map(function (r) { return r.draft_version; }), ['4', '3
   'C6b at versions 4 and 3');
 
 // WHAT THE SERVER SAID, AND WHAT THE BROWSER SAW, KEPT APART.
-eq(C.res.server_response.required_shape.outcome, 'AI_PLAN_NO_ACTION', 'C7  the required response outcome');
-eq(C.res.server_response.required_shape.code, 'NO_REPLENISHMENT_REQUIRED', 'C7a and its code');
-eq([C.res.server_response.required_shape.recommended_qty,
-  C.res.server_response.required_shape.qualifying_planned_qty,
-  C.res.server_response.required_shape.residual_qty], [0, 520, 0], 'C7b 0 / 520 / 0');
-eq([C.res.server_response.required_shape.created_headers, C.res.server_response.required_shape.created_lines,
-  C.res.server_response.required_shape.updated_headers, C.res.server_response.required_shape.updated_lines,
-  C.res.server_response.required_shape.cancelled_headers, C.res.server_response.required_shape.cancelled_lines,
-  C.res.server_response.required_shape.db_writes], [0, 0, 0, 0, 0, 0, 0],
+eq(C.res.expected_production_decision.required_shape.outcome, 'AI_PLAN_NO_ACTION', 'C7  the required response outcome');
+eq(C.res.expected_production_decision.required_shape.code, 'NO_REPLENISHMENT_REQUIRED', 'C7a and its code');
+eq([C.res.expected_production_decision.required_shape.recommended_qty,
+  C.res.expected_production_decision.required_shape.qualifying_planned_qty,
+  C.res.expected_production_decision.required_shape.residual_qty], [0, 520, 0], 'C7b 0 / 520 / 0');
+eq([C.res.expected_production_decision.required_shape.created_headers, C.res.expected_production_decision.required_shape.created_lines,
+  C.res.expected_production_decision.required_shape.updated_headers, C.res.expected_production_decision.required_shape.updated_lines,
+  C.res.expected_production_decision.required_shape.cancelled_headers, C.res.expected_production_decision.required_shape.cancelled_lines,
+  C.res.expected_production_decision.required_shape.db_writes], [0, 0, 0, 0, 0, 0, 0],
   'C7c every mutation counter zero');
-eq(C.res.browser_transport.measured_here, false,
+eq(C.res.actual_browser_response.measured_here, false,
   'C8  the readback does NOT claim to have measured the browser');
-ok(String(C.res.browser_transport.why).indexOf('fabricating it here') > 0,
+ok(String(C.res.actual_browser_response.why_not_measured_here).indexOf('nobody received') > 0,
   'C8a and says so rather than inventing a request count');
-eq(C.res.browser_transport.required_delta,
+eq(C.res.actual_browser_response.required_delta,
   { mutation_requests: 1, action: 'weeklyAiPlan.generate', route_save_requests: 0, submit_requests: 0,
     reservation_requests: 0, second_generation_requests: 0 },
   'C8b stating the delta the browser half must show');
@@ -352,9 +408,9 @@ eq(D1.res.new_rows.map(function (r) { return r.allocation_draft_id; }), ['SADH-N
 ok(failed(D1.res).indexOf('active_ai_rows_did_not_increase') >= 0, 'D1b the AI row count is named too');
 
 afterFreeze('D2  Route A at a moved version', { aHeader: { draft_version: '5' } },
-  'route_A_is_byte_identical');
+  'route_A_header_is_byte_identical_across_every_column');
 afterFreeze('D3  Route B at a moved version', { bHeader: { draft_version: '4' } },
-  'route_B_is_byte_identical');
+  'route_B_header_is_byte_identical_across_every_column');
 afterFreeze('D4  Route A with a moved updated_at',
   { aHeader: { updated_at: 'Mon Sep 07 2026 09:00:00 GMT+0800 (Taiwan Standard Time)' } },
   'route_A_updated_at_did_not_move');
@@ -362,7 +418,8 @@ afterFreeze('D5  Route B with a moved line timestamp',
   { bLine: { updated_at: 'Mon Sep 07 2026 09:00:00 GMT+0800 (Taiwan Standard Time)' } },
   'route_B_line_updated_at_did_not_move');
 afterFreeze('D6  Route B with a persisted last mile',
-  { bHeader: { recommended_last_mile_delivery: 'parcel' } }, 'route_B_is_byte_identical');
+  { bHeader: { recommended_last_mile_delivery: 'parcel' } },
+  'route_B_header_is_byte_identical_across_every_column');
 afterFreeze('D7  a manual route re-owned by a run',
   { aHeader: { generation_type: 'system_generated', generation_run_id: 'AIRUN-Z' } },
   'route_A_was_not_re_owned_by_a_run');
@@ -380,13 +437,6 @@ ok(D10.res.changed_fields.some(function (c) { return c.route === 'A' && c.field 
 section('E — the browser half, run against a real timeline shape');
 // ================================================================================================================
 
-// extractVar stops at the closing bracket, so it hands back the array literal without the .join() that
-// follows it. Joined here the same way the census does, which is also a check that it IS a line array.
-function snippet(name) {
-  var v = vm.runInNewContext(extractVar(CENSUS, name) + ' ' + name);
-  if (!Array.isArray(v)) throw new Error(name + ' is no longer a line array');
-  return v.join(NLF);
-}
 var BASE_SNIP = snippet('R6R7_BROWSER_BASELINE_SNIPPET_');
 var DELTA_SNIP = snippet('R6R7_BROWSER_DELTA_SNIPPET_');
 
@@ -468,27 +518,49 @@ section('F — the twelve steps, the two rollbacks, and the number that is not a
 // ================================================================================================================
 
 var STEPS = M.res.activation_steps;
-eq(STEPS.length, 12, 'F1  twelve steps, written down');
-eq(STEPS.map(function (s) { return s.n; }), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12], 'F1a numbered in order');
-ok(String(STEPS[0].do).indexOf('INVENTORY_AI_PLAN_DB_GENERATION_ENABLED_') > 0
-  && String(STEPS[0].do).indexOf('true') > 0, 'F2  step 1 flips the one constant');
-ok(String(STEPS[1].do).indexOf('00_config.gs') > 0, 'F3  step 2 syncs only what changed');
-ok(String(STEPS[2].do).indexOf('deployment version') > 0, 'F4  step 3 publishes a deployment version');
-ok(String(STEPS[4].do).indexOf('EFFECTIVE flag') > 0, 'F5  step 5 verifies the EFFECTIVE flag, not the file');
-ok(String(STEPS[6].do).indexOf('ONCE') > 0 && String(STEPS[6].do).indexOf('BASELINE') > 0,
-  'F6  step 7 takes the baseline and presses once');
-ok(String(STEPS[7].do).indexOf('second time') > 0, 'F7  step 8 forbids the second press');
-ok(String(STEPS[8].do).indexOf('Submit') > 0, 'F8  step 9 forbids Submit');
-ok(String(STEPS[9].do).indexOf('READBACK') > 0, 'F9  step 10 reads back immediately');
-ok(String(STEPS[10].do).indexOf('false') > 0, 'F10 step 11 restores the flag');
-ok(String(STEPS[11].do).indexOf('false') > 0, 'F11 and step 12 verifies it is false again');
-// And the manifest itself IS the step-12 check: re-run with the flag left on and it refuses.
+eq(STEPS.length, 14, 'F1  fourteen steps, written down');
+eq(STEPS.map(function (s) { return s.n; }), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
+  'F1a numbered in order');
+// R3-P1 §七 — THE FREEZE COMES BEFORE THE AUTHORIZATION. An authorization given while the baseline is
+// still null authorizes a click that nothing can check afterwards.
+eq(STEPS.map(function (s) { return s.phase; }).slice(0, 5),
+  ['PREPARE', 'PREPARE', 'PREPARE', 'PREPARE', 'AUTHORIZE'],
+  'F1b the four read-only preparation steps come before the authorization');
+ok(String(STEPS[0].do).indexOf('ACTIVATION_MANIFEST') > 0, 'F2  step 1 runs the manifest');
+ok(String(STEPS[1].do).indexOf('R6R7_NO_ACTION_BEFORE_') > 0, 'F2a step 2 pastes the freeze block');
+ok(String(STEPS[3].do).indexOf('READBACK') > 0 && String(STEPS[3].note).indexOf('AWAITING_ACTIVATION') > 0,
+  'F3  step 4 is the baseline check, and it expects AWAITING_ACTIVATION rather than a generic STOP');
+ok(String(STEPS[4].do).indexOf('explicit authorization') > 0,
+  'F3a step 5 is where a person authorizes, and everything before it is read-only');
+ok(String(STEPS[5].do).indexOf('INVENTORY_AI_PLAN_DB_GENERATION_ENABLED_') > 0
+  && String(STEPS[5].do).indexOf('true') > 0, 'F4  step 6 flips the one constant');
+ok(String(STEPS[6].do).indexOf('00_config.gs') > 0 && String(STEPS[6].do).indexOf('deployment version') > 0,
+  'F5  step 7 syncs only what changed and publishes a version');
+ok(String(STEPS[7].do).indexOf('EFFECTIVE') > 0, 'F5a step 8 verifies the EFFECTIVE flag, not the file');
+ok(String(STEPS[8].do).indexOf('BASELINE') > 0 && String(STEPS[8].do).indexOf('CAPTURE') > 0,
+  'F6  step 9 installs BOTH the baseline and the response capture, before the click');
+ok(String(STEPS[9].do).indexOf('ONCE') > 0 && String(STEPS[9].do).indexOf('Submit') > 0,
+  'F7  step 10 presses once and forbids Submit');
+ok(String(STEPS[10].do).indexOf('R6R7_ACTUAL_BROWSER_RESPONSE_') > 0,
+  'F8  step 11 pastes the browser audit back in');
+ok(String(STEPS[10].note).indexOf('AWAITING_BROWSER_AUDIT') > 0,
+  'F8a and says what the readback answers without it');
+ok(String(STEPS[11].do).indexOf('CONTROLLED_NO_ACTION_CONFIRMED') > 0, 'F9  step 12 reads back');
+ok(String(STEPS[12].do).indexOf('false') > 0, 'F10 step 13 restores the flag');
+ok(String(STEPS[13].do).indexOf('false') > 0, 'F11 and step 14 verifies it is false again');
+// And the manifest itself IS the post-restore check: re-run with the flag left on and it refuses.
 eq(manifest(live(), { flagTrue: true }).res.verdict, 'STOP',
-  'F12 a flag left true after step 11 makes the manifest STOP — it is the post-restore check too');
+  'F12 a flag left true after the restore makes the manifest STOP — it is the post-restore check too');
 eq(M.res.flag.must_be_after_step_11, false, 'F12a which the flag contract states');
 
 var AUD = M.res.browser_audit;
 eq(AUD.expected_shape.browser_mutation_requests_delta, 1, 'F13 one mutation REQUEST is expected');
+// R3-P1 — the capture, and the sentence that stops a timeline phase standing in for a response body.
+ok(AUD.capture_snippet.indexOf('generateWeeklyAiPlanDraft') > 0, 'F13x the capture snippet is published');
+ok(AUD.audit_snippet.indexOf('ACTUAL_RESPONSE_NOT_CAPTURED') > 0,
+  'F13y and the audit snippet refuses without a captured body');
+ok(String(AUD.a_timeline_success_is_not_a_response).indexOf('does not say what the body') > 0,
+  'F13z with the reason stated rather than assumed');
 eq(AUD.expected_shape.server_db_writes, 0, 'F13a beside zero database writes');
 ok(String(AUD.the_misreading_to_avoid).indexOf('roll back a correct finish') > 0,
   'F13b and the misreading is named: a request count is not a write count');
@@ -528,8 +600,11 @@ var MAX = vm.runInNewContext(extractVar(CENSUS, 'R6R7_PROOF_MAX_BYTES_') + ' R6R
 });
 
 var MP = proofOf(M), CP = proofOf(C);
-eq(MP.frozen_before.route_a_fingerprint, B.route_a_fingerprint,
-  'G3  the manifest proof carries the fingerprints it froze');
+eq(MP.routes.a_route_view, B.route_a_fingerprint,
+  'G3  the manifest proof carries the route-view fingerprint it froze');
+eq([MP.routes.a_header, MP.routes.a_line, MP.routes.a_combined],
+  [B.route_a_header_full_fingerprint, B.route_a_line_full_fingerprint, B.route_a_combined_full_fingerprint],
+  'G3z and all three FULL-row fingerprints, which are the byte-identical claim');
 eq([MP.flag_now, MP.flag_flipped_this_round, MP.generation_called_this_round], [false, false, false],
   'G3a and that nothing was flipped or called');
 eq([CP.route_a.identical, CP.route_b.identical], [true, true],
@@ -555,7 +630,11 @@ eq(/var TEMP_E3_CENSUS_BUILD_ = '([^']+)'/.exec(CENSUS)[1], DEPLOYMENT_BUILD,
   'H2  and the census still reports the build it diagnoses');
 eq(['RUN_R6R7_CONTROLLED_NO_ACTION_ACTIVATION_MANIFEST', 'RUN_R6R7_CONTROLLED_NO_ACTION_READBACK',
   'CENSUS_r6r7RouteFingerprint_', 'CENSUS_r6r7RowCount_', 'CENSUS_r6r7Deployment_',
-  'CENSUS_r6r7ActivationSteps_', 'CENSUS_r6r7ActivationRollback_', 'CENSUS_r6r7BrowserAudit_'
+  'CENSUS_r6r7ActivationSteps_', 'CENSUS_r6r7ActivationRollback_', 'CENSUS_r6r7BrowserAudit_',
+  // R3-P1's additions, held to the same rule.
+  'CENSUS_r6r7SchemaAuthority_', 'CENSUS_r6r7LiveSchemaOf_', 'CENSUS_r6r7FullRowSnapshot_',
+  'CENSUS_r6r7RouteFullSnapshot_', 'CENSUS_r6r7CompareSnapshots_', 'CENSUS_r6r7IdentityUniverse_',
+  'CENSUS_r6r7ReservationObservation_', 'CENSUS_r6r7RawTables_', 'CENSUS_r6r7ActualResponseState_'
 ].filter(function (f) {
   var s = extractFn(CENSUS, f);
   return /handleUpsertShippingAllocationDraftAtomic_\s*\(/.test(s) || /appendRow|setValues|setValue\s*\(/.test(s)
@@ -583,8 +662,10 @@ mut('N1 the fingerprint blind to a field, so a moved row still matches', functio
   var badF = freezeFrom(live(), { census: m });
   var bad = withCensus(m, 'RUN_R6R7_CONTROLLED_NO_ACTION_READBACK', { aHeader: { draft_version: '5' } },
     { after: badF.source });
-  return failed(clean.res).indexOf('route_A_is_byte_identical') >= 0
-    && failed(bad.res).indexOf('route_A_is_byte_identical') < 0;
+  return failed(clean.res).indexOf('route_A_route_view_is_byte_identical') >= 0
+    && failed(bad.res).indexOf('route_A_route_view_is_byte_identical') < 0
+    // and the FULL-row fingerprint still catches the move the route view went blind to.
+    && failed(bad.res).indexOf('route_A_header_is_byte_identical_across_every_column') >= 0;
 });
 
 mut('N2 the readback recomputing its own baseline instead of refusing', function () {
@@ -595,7 +676,7 @@ mut('N2 the readback recomputing its own baseline instead of refusing', function
     "  if (false) { missing.push('baseline_frozen'); }");
   var clean = runIt('RUN_R6R7_CONTROLLED_NO_ACTION_READBACK');
   var bad = withCensus(m, 'RUN_R6R7_CONTROLLED_NO_ACTION_READBACK');
-  return clean.res.verdict === 'STOP'
+  return clean.res.verdict === 'BASELINE_NOT_FROZEN'
     && String(clean.res.stop_reason).indexOf('BASELINE_NOT_FROZEN') === 0
     && String(bad.res.stop_reason).indexOf('BASELINE_NOT_FROZEN') < 0;
 });
@@ -693,34 +774,38 @@ mut('N9 the manual total compared against itself rather than against BEFORE', fu
 mut('N10 the readback claiming to have measured the browser', function () {
   var m = swap(CENSUS, "    measured_here: false,", "    measured_here: true,");
   var badF = freezeFrom(live(), { census: m });
-  var bad = withCensus(m, 'RUN_R6R7_CONTROLLED_NO_ACTION_READBACK', live(), { after: badF.source });
-  return readback(freezeFrom()).res.browser_transport.measured_here === false
-    && bad.res.browser_transport.measured_here === true;
+  var bad = withCensus(m, 'RUN_R6R7_CONTROLLED_NO_ACTION_READBACK', live(),
+    { after: badF.source + auditSrc() });
+  return readback(freezeFrom()).res.actual_browser_response.measured_here === false
+    && bad.res.actual_browser_response.measured_here === true;
 });
 
-mut('N11 an unreadable reservation count read as zero', function () {
-  // A world where the server manifest cannot be asked either, so null === null is the ONLY thing left.
-  var noManifest = swap(CENSUS,
-    "    var man = (typeof weeklyAiPlanActivationManifest_ === 'function') ? weeklyAiPlanActivationManifest_() : null;",
-    "    var man = null;");
-  var m = swap(noManifest, "    resvComparable ? (resv.row_count === B.reservation_row_count) : resvDeclaredZero);",
-    "    resv.row_count === B.reservation_row_count);");
-  var cf = freezeFrom(live(), { census: noManifest });
-  var clean = withCensus(noManifest, 'RUN_R6R7_CONTROLLED_NO_ACTION_READBACK', live(), { after: cf.source });
-  var bf = freezeFrom(live(), { census: m });
-  var bad = withCensus(m, 'RUN_R6R7_CONTROLLED_NO_ACTION_READBACK', live(), { after: bf.source });
-  return failed(clean.res).indexOf('no_reservation_appeared') >= 0
-    && failed(bad.res).indexOf('no_reservation_appeared') < 0;
+mut('N11 an unreadable reservation table read as an empty one', function () {
+  // R3-P1 §三 — SHEET_PRESENT_BUT_UNREADABLE is the state that cannot be worked around: the table is there
+  // and will not open, so neither a count nor a structural guarantee describes what is in it. The mutant
+  // lets that state through as acceptable, which is exactly what null === null used to do.
+  var m = swap(CENSUS,
+    "    o.acceptable = false;", "    o.acceptable = true;");
+  var breakIt = "(function(){ var b = SpreadsheetApp.openById('x'); var g = b.getSheetByName;"
+    + " b.getSheetByName = function (n) { if (n === 'reservations') { return { getDataRange: function ()"
+    + " { throw new Error('BOOM'); }, getLastRow: function () { return 1; } }; } return g.call(b, n); }; })();";
+  var cf = freezeFrom(live(), { after: breakIt });
+  var clean = readback(cf, live(), { after: breakIt });
+  var bf = freezeFrom(live(), { census: m, after: breakIt });
+  var bad = withCensus(m, 'RUN_R6R7_CONTROLLED_NO_ACTION_READBACK', live(),
+    { after: breakIt + bf.source + auditSrc() });
+  return failed(clean.res).indexOf('reservation_table_is_not_present_but_unreadable') >= 0
+    && failed(bad.res).indexOf('reservation_table_is_not_present_but_unreadable') < 0;
 });
 
 mut('N12 the manifest proof dropping the frozen fingerprints', function () {
   var m = swap(CENSUS, "    if (!b.route_a_fingerprint || !b.route_b_fingerprint) missing.push('frozen_before.route_fingerprints');",
     "    if (false) { missing.push('x'); }");
-  m = swap(m, "      route_a_fingerprint: b.route_a_fingerprint || null,",
-    "      route_a_fingerprint: null,");
+  m = swap(m, "      a_route_view: b.route_a_fingerprint || null,",
+    "      a_route_view: null,");
   var bad = withCensus(m, 'RUN_R6R7_CONTROLLED_NO_ACTION_ACTIVATION_MANIFEST');
-  return !!proofOf(manifest()).frozen_before.route_a_fingerprint
-    && proofOf(bad).frozen_before.route_a_fingerprint === null
+  return !!proofOf(manifest()).routes.a_route_view
+    && proofOf(bad).routes.a_route_view === null
     && proofOf(bad).proof_complete === true;
 });
 

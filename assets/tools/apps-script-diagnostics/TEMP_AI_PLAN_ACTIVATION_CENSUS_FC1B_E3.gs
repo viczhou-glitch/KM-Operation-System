@@ -6385,8 +6385,15 @@ var R6R7_REQUIRED_EXPORT_ = {
   RUN_R6R7_CONTROLLED_AI_PLAN_READBACK: ['counts'],
   // R6-R7-R3. The manifest's verdict rests on what it FROZE; a READY_TO_AUTHORIZE that does not carry the
   // baseline is an authorization nobody can check afterwards. The readback's rests on what it COMPARED.
-  RUN_R6R7_CONTROLLED_NO_ACTION_ACTIVATION_MANIFEST: ['frozen_before', 'production_path', 'deployment'],
-  RUN_R6R7_CONTROLLED_NO_ACTION_READBACK: ['counts', 'routes_observed']
+  //
+  // R3-P1 widens both lists to everything the new claims rest on: the schema the snapshots were taken
+  // against, the identity universe, the reservation observation, and — on the readback — the three
+  // separately-sourced objects that must all be present before anything is confirmed.
+  RUN_R6R7_CONTROLLED_NO_ACTION_ACTIVATION_MANIFEST: ['frozen_before', 'production_path', 'deployment',
+    'schema_authority', 'live_schema', 'identity_universe', 'reservation_observation'],
+  RUN_R6R7_CONTROLLED_NO_ACTION_READBACK: ['counts', 'routes_observed', 'schema_now',
+    'identity_universe_now', 'reservation_observation', 'expected_production_decision',
+    'actual_browser_response', 'database_observed_after']
 };
 
 // ================================================================================================================
@@ -6407,10 +6414,453 @@ var R6R7_REQUIRED_EXPORT_ = {
 // as the second is how a correct finish gets rolled back.
 // ================================================================================================================
 
-/** The frozen BEFORE. The literal fields are already frozen by section 0 and every earlier round; the null
- *  ones are the LIVE facts only a run can supply, and the manifest prints the exact block to paste here.
- *  While any of them is null the readback STOPS with BASELINE_NOT_FROZEN — it will not prove stillness
- *  against a baseline it does not have. */
+// ================================================================================================================
+// F1-7N-FC-1B-E3-R4-A2-R1-R6-R7-R3-P1 — FULL-ROW FREEZE, AND THE RESPONSE SOMEBODY ACTUALLY RECEIVED.
+//
+// R3 froze eighteen fields and called the result byte-identical. The live tables carry 36 header columns and
+// 31 line columns, so eighteen fields could not have proved that sentence: a generation that touched
+// `create_idempotency_key`, `formula_version`, `source_data_as_of`, `expected_arrival` or any of the other
+// forty-nine columns would have moved a row while every fingerprint stayed equal. A claim that cannot fail is
+// not evidence, so the claim is made over EVERY canonical column or it is not made at all.
+//
+// AND THE OTHER HALF: R3's readback described what 61_'s decision builder WOULD answer and printed it beside
+// the database. That is an expectation, not the response the browser received. A run that returned something
+// else entirely — a different code, a partial envelope, an error body under an HTTP 200 — would have been
+// reported as agreement, because nothing in the readback had ever seen the actual reply. So the three things
+// are now three named objects that never stand in for one another: expected_production_decision (recomputed
+// here), actual_browser_response (captured in the browser, pasted in by a person, UNKNOWN until it is), and
+// database_observed_after (read here). CONFIRMED requires all three, and AWAITING_BROWSER_AUDIT is what a
+// readback says while it only has two.
+// ================================================================================================================
+
+var R6R7_SCHEMA_TABLES_ = { header: 'shipping_allocation_drafts', line: 'shipping_allocation_draft_lines' };
+var R6R7_RESERVATION_TABLE_ = 'reservations';
+// The field separator every fingerprint below joins on. A character that cannot occur in a column name or a
+// normalized cell, so 'ab' + 'c' and 'a' + 'bc' can never hash to the same string — which is the whole reason
+// a fingerprint is allowed to stand for a row.
+var R6R7_SEP_ = String.fromCharCode(1);
+// A second, distinct separator for the tuples inside one universe entry, so a field boundary can never be
+// confused with a row boundary.
+var R6R7_SEP2_ = String.fromCharCode(2);
+
+/** The column order is the SCHEMA AUTHORITY's, never Object.keys(). Key order on an object read out of a
+ *  sheet is an accident of which cells happened to be non-blank, and a fingerprint over an accidental order
+ *  is not reproducible across two reads, let alone two deployments. 16_ owns both lists; this reads them. */
+function CENSUS_r6r7SchemaAuthority_() {
+  var missing = [];
+  var hdr = null, ln = null;
+  try { hdr = (typeof SHIPPING_ALLOCATION_DRAFTS_HEADERS_FULL_ !== 'undefined')
+    ? SHIPPING_ALLOCATION_DRAFTS_HEADERS_FULL_ : null; } catch (e1) { hdr = null; }
+  try { ln = (typeof SHIPPING_ALLOCATION_DRAFT_LINES_HEADERS_FULL_ !== 'undefined')
+    ? SHIPPING_ALLOCATION_DRAFT_LINES_HEADERS_FULL_ : null; } catch (e2) { ln = null; }
+  if (!hdr || !hdr.length) missing.push('SHIPPING_ALLOCATION_DRAFTS_HEADERS_FULL_ (16_)');
+  if (!ln || !ln.length) missing.push('SHIPPING_ALLOCATION_DRAFT_LINES_HEADERS_FULL_ (16_)');
+  function names(table, cols) {
+    return { table: table, columns: (cols || []).slice(), column_count: (cols || []).length,
+      names_fingerprint: CENSUS_fp_(table + '|' + (cols || []).length + '|' + (cols || []).join(R6R7_SEP_)) };
+  }
+  return {
+    available: missing.length === 0, missing: missing,
+    source: '16_shipping_allocation_handlers.gs — the same constants the write gate validates against',
+    header: names(R6R7_SCHEMA_TABLES_.header, hdr),
+    line: names(R6R7_SCHEMA_TABLES_.line, ln)
+  };
+}
+
+// ---- THE NORMALIZERS ARE THE PROJECT'S, AND THERE IS NO SECOND ONE. ---------------------------------------
+//
+// Three classes, and each one's authority is a constant or a function that already exists:
+//   DAY      SAD_K2_FP_DATE_FIELDS_    -> sadFpNorm_  (16_) — a calendar date, compared at day granularity in
+//                                        the project timezone, so 2026-09-06 and a Date at 00:00 Taipei agree.
+//   NUMERIC  SAD_K2_FP_NUMERIC_FIELDS_ -> sadFpNorm_  (16_) — '320', 320 and 320.0 are one value.
+//   INSTANT  everything else           -> sadAuditNormCell_ (41_) then sadFpVal_ (16_) — a Date becomes its
+//                                        epoch, which is timezone-independent, and text is trimmed.
+// Writing a fourth parser here is exactly what the round forbids: two timestamp parsers in one repository
+// will eventually disagree, and the one that disagrees silently is the one holding the evidence.
+function CENSUS_r6r7NormalizerAuthority_() {
+  var missing = [];
+  var hasFpNorm = false, hasAudit = false, hasFpVal = false, hasDay = false, hasNum = false;
+  try { hasFpNorm = typeof sadFpNorm_ === 'function'; } catch (e1) {}
+  try { hasAudit = typeof sadAuditNormCell_ === 'function'; } catch (e2) {}
+  try { hasFpVal = typeof sadFpVal_ === 'function'; } catch (e3) {}
+  try { hasDay = typeof SAD_K2_FP_DATE_FIELDS_ !== 'undefined'; } catch (e4) {}
+  try { hasNum = typeof SAD_K2_FP_NUMERIC_FIELDS_ !== 'undefined'; } catch (e5) {}
+  if (!hasFpNorm) missing.push('sadFpNorm_ (16_)');
+  if (!hasAudit) missing.push('sadAuditNormCell_ (41_)');
+  if (!hasFpVal) missing.push('sadFpVal_ (16_)');
+  if (!hasDay) missing.push('SAD_K2_FP_DATE_FIELDS_ (16_)');
+  if (!hasNum) missing.push('SAD_K2_FP_NUMERIC_FIELDS_ (16_)');
+  return {
+    available: missing.length === 0, missing: missing,
+    day_and_numeric: hasFpNorm ? 'sadFpNorm_ (16_)' : null,
+    instant: hasAudit ? 'sadAuditNormCell_ (41_) — a Date becomes its epoch, so a timezone display string'
+      + ' cannot read as a change' : null,
+    text: hasFpVal ? 'sadFpVal_ (16_)' : null,
+    second_parser_written_here: false,
+    note: 'if any of these is absent the snapshot still reports, but the manifest STOPs: a fingerprint built'
+      + ' by a fallback is not the fingerprint the readback will rebuild.'
+  };
+}
+
+function CENSUS_r6r7FieldClass_(column) {
+  try { if (typeof SAD_K2_FP_DATE_FIELDS_ !== 'undefined' && SAD_K2_FP_DATE_FIELDS_[column]) return 'DAY'; } catch (e1) {}
+  try { if (typeof SAD_K2_FP_NUMERIC_FIELDS_ !== 'undefined' && SAD_K2_FP_NUMERIC_FIELDS_[column]) return 'NUMERIC'; } catch (e2) {}
+  return 'INSTANT_OR_TEXT';
+}
+
+function CENSUS_r6r7NormCell_(column, value) {
+  var cls = CENSUS_r6r7FieldClass_(column);
+  try {
+    if ((cls === 'DAY' || cls === 'NUMERIC') && typeof sadFpNorm_ === 'function') {
+      return String(sadFpNorm_(column, value));
+    }
+  } catch (e1) {}
+  try {
+    if (typeof sadAuditNormCell_ === 'function') {
+      var a = sadAuditNormCell_(value);
+      return (typeof sadFpVal_ === 'function') ? sadFpVal_(a) : CENSUS_str_(a);
+    }
+  } catch (e2) {}
+  return CENSUS_str_(value);
+}
+
+/** The live shape of one table, and 16_'s own verdict on it. Reported, never guessed: a version this census
+ *  invented would be a second schema opinion, which is the defect 16_ §5 was written to remove. */
+function CENSUS_r6r7LiveSchemaOf_(ss, table, canonical) {
+  var o = { table: table, present: false, live_column_names: [], live_column_count: 0,
+    live_names_fingerprint: null, canonical_column_count: (canonical || []).length,
+    canonical_names_fingerprint: CENSUS_fp_(table + '|' + (canonical || []).length + '|'
+      + (canonical || []).join(R6R7_SEP_)),
+    schema_version: null, schema_version_source: null, exact_reason: null, ok: false, reason: null };
+  if (!ss) { o.reason = 'DB_NOT_OPENED'; return o; }
+  var sh = null;
+  try { sh = ss.getSheetByName(table); } catch (eL) { o.reason = 'LOOKUP_THREW: ' + CENSUS_str_(eL && eL.message); return o; }
+  if (!sh) { o.reason = 'SHEET_NOT_PRESENT'; return o; }
+  o.present = true;
+  try {
+    var v = sh.getDataRange().getValues();
+    var names = ((v && v.length) ? v[0] : []).map(function (h) { return CENSUS_str_(h); });
+    while (names.length && names[names.length - 1] === '') names.pop();
+    o.live_column_names = names;
+    o.live_column_count = names.length;
+    o.live_names_fingerprint = CENSUS_fp_(table + '|' + names.length + '|' + names.join(R6R7_SEP_));
+    var isHeader = table === R6R7_SCHEMA_TABLES_.header;
+    if (isHeader) {
+      // 16_ ENUMERATES the header's generations by name. Selecting one of those is the only way to say which
+      // schema a live sheet is at; counting columns would accept an unknown name at the right index.
+      if (typeof sadResolveHeaderSchema_ === 'function') {
+        var r = sadResolveHeaderSchema_(names);
+        o.schema_version = r.ok ? r.version : null;
+        o.exact_reason = r.ok ? '' : CENSUS_str_(r.reason || 'SCHEMA_UNRESOLVED');
+        o.schema_version_source = 'sadResolveHeaderSchema_ (16_) — the enumerated header generations';
+      } else {
+        o.schema_version_source = 'UNAVAILABLE: sadResolveHeaderSchema_ (16_) is not synced';
+      }
+    } else if (typeof sadExactSchemaReason_ === 'function') {
+      // The LINE has no enumerated generation list in 16_, only the write gate and an optional tail. So the
+      // version here is DERIVED, and it says so rather than borrowing the header's vocabulary.
+      var tail = [];
+      try { tail = (typeof SAD_LINE_ETA_TAIL_COLUMNS_ !== 'undefined') ? SAD_LINE_ETA_TAIL_COLUMNS_ : []; } catch (eT) { tail = []; }
+      var reason = sadExactSchemaReason_(sh, canonical || [], tail);
+      o.exact_reason = CENSUS_str_(reason);
+      o.schema_version = (o.exact_reason === '')
+        ? (names.length === (canonical || []).length ? 'LINE-ETA-TAIL-PRESENT' : 'LINE-ETA-TAIL-ABSENT') : null;
+      o.schema_version_source = 'sadExactSchemaReason_ (16_) + SAD_LINE_ETA_TAIL_COLUMNS_ — 16_ enumerates'
+        + ' named generations for the HEADER only, so the line version is DERIVED from the tail and says so';
+    } else {
+      o.schema_version_source = 'UNAVAILABLE: sadExactSchemaReason_ (16_) is not synced';
+    }
+    o.ok = o.schema_version !== null
+      && o.live_column_count === o.canonical_column_count
+      && o.live_names_fingerprint === o.canonical_names_fingerprint;
+    if (!o.ok && !o.reason) {
+      o.reason = o.exact_reason
+        || ('LIVE_SCHEMA_IS_NOT_THE_FULL_CANONICAL_SHAPE: ' + o.live_column_count + ' of '
+          + o.canonical_column_count + ' columns');
+    }
+  } catch (e) { o.reason = 'UNREADABLE: ' + CENSUS_str_(e && e.message); }
+  return o;
+}
+
+function CENSUS_r6r7LiveSchema_(ss, authority) {
+  var h = CENSUS_r6r7LiveSchemaOf_(ss, R6R7_SCHEMA_TABLES_.header, authority.header.columns);
+  var l = CENSUS_r6r7LiveSchemaOf_(ss, R6R7_SCHEMA_TABLES_.line, authority.line.columns);
+  return { header: h, line: l, ok: h.ok && l.ok,
+    reason: h.ok ? (l.ok ? null : ('line: ' + l.reason)) : ('header: ' + h.reason) };
+}
+
+/** One row, every canonical column, in the authority's order. `excluded_fields` is the honest name for a
+ *  column the canonical list has and the live sheet does not: it is not covered by the fingerprint, so the
+ *  byte-identical claim is narrower than it sounds — and R3-P1 §一.7 makes that a STOP rather than a
+ *  footnote, because a narrower claim reported under the same words is the failure being fixed. */
+function CENSUS_r6r7FullRowSnapshot_(table, row, canonical, liveNames) {
+  var liveSet = {};
+  (liveNames || []).forEach(function (n) { if (n) liveSet[n] = 1; });
+  var fields = {}, excluded = [], parts = [];
+  var classes = { DAY: 0, NUMERIC: 0, INSTANT_OR_TEXT: 0 };
+  (canonical || []).forEach(function (col) {
+    if (!liveSet[col]) { excluded.push({ column: col, reason: 'NOT_PRESENT_IN_LIVE_SCHEMA' }); return; }
+    var cls = CENSUS_r6r7FieldClass_(col);
+    classes[cls] = (classes[cls] || 0) + 1;
+    var norm = row ? CENSUS_r6r7NormCell_(col, row[col]) : '';
+    fields[col] = norm;
+    parts.push(col + '=' + norm);
+  });
+  var unexpected = (liveNames || []).filter(function (n) {
+    return n !== '' && (canonical || []).indexOf(n) === -1; });
+  return {
+    table: table, row_found: !!row,
+    canonical_field_count: (canonical || []).length,
+    covered_field_count: parts.length,
+    excluded_fields: excluded,
+    unexpected_live_columns: unexpected,
+    field_classes: classes,
+    fields: fields,
+    fingerprint: row ? CENSUS_fp_(table + '|' + parts.length + '|' + parts.join(R6R7_SEP_)) : null
+  };
+}
+
+/** A route is a header row and a line row, so it gets three fingerprints: one for each half and one for the
+ *  pair. The combined one is what 'this route did not move' means; the two halves say which side moved. */
+function CENSUS_r6r7RouteFullSnapshot_(authority, liveSchema, headerRow, lineRow) {
+  var h = CENSUS_r6r7FullRowSnapshot_(R6R7_SCHEMA_TABLES_.header, headerRow,
+    authority.header.columns, liveSchema.header.live_column_names);
+  var l = CENSUS_r6r7FullRowSnapshot_(R6R7_SCHEMA_TABLES_.line, lineRow,
+    authority.line.columns, liveSchema.line.live_column_names);
+  var ex = h.excluded_fields.map(function (e) { return R6R7_SCHEMA_TABLES_.header + '.' + e.column; })
+    .concat(l.excluded_fields.map(function (e) { return R6R7_SCHEMA_TABLES_.line + '.' + e.column; }));
+  return {
+    header_snapshot: h, line_snapshot: l,
+    header_full_fingerprint: h.fingerprint,
+    line_full_fingerprint: l.fingerprint,
+    combined_full_fingerprint: (h.fingerprint && l.fingerprint)
+      ? CENSUS_fp_(h.fingerprint + R6R7_SEP_ + l.fingerprint) : null,
+    canonical_field_count: h.canonical_field_count + l.canonical_field_count,
+    covered_field_count: h.covered_field_count + l.covered_field_count,
+    excluded_fields: ex
+  };
+}
+
+/** Field-by-field, against a frozen snapshot. The fingerprint says a row moved; this says which column, what
+ *  it was and what it is — and it reports a column that DISAPPEARED from the snapshot as well as one that
+ *  changed, because a shrinking comparison is how a diff quietly stops covering something. */
+function CENSUS_r6r7CompareSnapshots_(label, half, before, after) {
+  var out = [];
+  var b = (before && before.fields) || {}, a = (after && after.fields) || {};
+  var seen = {};
+  Object.keys(b).forEach(function (k) {
+    seen[k] = 1;
+    if (!Object.prototype.hasOwnProperty.call(a, k)) {
+      out.push({ route: label, table: half, field: k, was: b[k], now: null,
+        reason: 'COLUMN_NO_LONGER_COMPARED' });
+    } else if (String(a[k]) !== String(b[k])) {
+      out.push({ route: label, table: half, field: k, was: b[k], now: a[k], reason: 'VALUE_CHANGED' });
+    }
+  });
+  Object.keys(a).forEach(function (k) {
+    if (!seen[k]) out.push({ route: label, table: half, field: k, was: null, now: a[k],
+      reason: 'COLUMN_NOT_IN_THE_FROZEN_SNAPSHOT' });
+  });
+  return out;
+}
+
+// ================================================================================================================
+// THE IDENTITY UNIVERSE. Not two rows — every row the scope can reach.
+//
+// Freezing only the two active manual routes would have missed the whole class of change that matters most
+// here: a header created and immediately cancelled, a row soft-deleted, an old terminal draft adopted by the
+// new run, a line moved to a different header. Every one of those leaves the two active routes byte-identical
+// and is still a write. So the universe is EVERY header matching the three scope axes at ANY status, every
+// line belonging to those headers, and the header-to-line relation between them.
+// ================================================================================================================
+var R6R7_UNIVERSE_MAX_HEADERS_ = 200;
+
+function CENSUS_r6r7IdentityUniverse_(raw, scope) {
+  var o = { available: false, reason: null, too_large: false,
+    header_ids: [], line_ids: [], relations: [], relation_fingerprint: null,
+    active_manual_header_ids: [], active_ai_header_ids: [], terminal_ai_header_ids: [],
+    terminal_manual_header_ids: [],
+    counts_by_status: {}, counts_by_provenance: {}, counts_by_status_and_provenance: {},
+    line_counts_by_status: {},
+    header_count: 0, line_count: 0, universe_fingerprint: null };
+  if (!raw || !raw.readable) { o.reason = (raw && raw.reason) || 'TABLES_NOT_READ'; return o; }
+  var term = null;
+  try { term = (typeof SAD_TERMINAL_STATUSES_ !== 'undefined') ? SAD_TERMINAL_STATUSES_ : null; } catch (e1) { term = null; }
+  if (!term) { o.reason = 'SAD_TERMINAL_STATUSES_ (16_) is absent, so terminal cannot be told from active'; return o; }
+
+  var hs = (raw.headers || []).filter(function (r) {
+    return CENSUS_low_(r.company) === CENSUS_low_(scope.company)
+      && CENSUS_low_(r.country) === CENSUS_low_(scope.country)
+      && CENSUS_low_(r.marketplace) === CENSUS_low_(scope.marketplace);
+  });
+  if (hs.length > R6R7_UNIVERSE_MAX_HEADERS_) {
+    o.too_large = true;
+    o.reason = 'IDENTITY_UNIVERSE_TOO_LARGE_TO_FREEZE: ' + hs.length + ' headers exceeds '
+      + R6R7_UNIVERSE_MAX_HEADERS_ + '. Truncating it silently would produce a baseline that cannot detect a'
+      + ' change in the rows it dropped, which is the one thing this freeze exists to prevent.';
+    o.header_count = hs.length;
+    return o;
+  }
+  var byId = {};
+  hs.forEach(function (r) { byId[CENSUS_str_(r.allocation_draft_id)] = r; });
+  o.header_ids = Object.keys(byId).sort();
+  var ls = (raw.lines || []).filter(function (r) { return byId[CENSUS_str_(r.allocation_draft_id)] !== undefined; });
+  o.line_ids = ls.map(function (r) { return CENSUS_str_(r.allocation_draft_line_id); }).sort();
+  o.header_count = o.header_ids.length;
+  o.line_count = o.line_ids.length;
+
+  function isAi(r) {
+    return CENSUS_low_(r.generation_type) === 'system_generated' || CENSUS_str_(r.generation_run_id) !== '';
+  }
+  function isTerminal(r) { return term[CENSUS_low_(r.status)] === 1; }
+
+  var tuples = [];
+  o.header_ids.forEach(function (id) {
+    var r = byId[id];
+    var st = CENSUS_low_(r.status) || '(blank)';
+    var pv = isAi(r) ? 'ai' : 'manual';
+    o.counts_by_status[st] = (o.counts_by_status[st] || 0) + 1;
+    o.counts_by_provenance[pv] = (o.counts_by_provenance[pv] || 0) + 1;
+    var k = st + '|' + pv;
+    o.counts_by_status_and_provenance[k] = (o.counts_by_status_and_provenance[k] || 0) + 1;
+    if (isTerminal(r)) { (pv === 'ai' ? o.terminal_ai_header_ids : o.terminal_manual_header_ids).push(id); }
+    else { (pv === 'ai' ? o.active_ai_header_ids : o.active_manual_header_ids).push(id); }
+    var mine = ls.filter(function (x) { return CENSUS_str_(x.allocation_draft_id) === id; })
+      .map(function (x) { return CENSUS_str_(x.allocation_draft_line_id); }).sort();
+    o.relations.push({ header_id: id, line_ids: mine });
+    tuples.push([id, st, CENSUS_low_(r.generation_type), CENSUS_str_(r.generation_run_id),
+      CENSUS_str_(r.draft_version), mine.join(',')].join(R6R7_SEP2_));
+  });
+  ls.forEach(function (r) {
+    var st = CENSUS_low_(r.line_status) || '(blank)';
+    o.line_counts_by_status[st] = (o.line_counts_by_status[st] || 0) + 1;
+  });
+  var lineTuples = ls.map(function (r) {
+    return [CENSUS_str_(r.allocation_draft_line_id), CENSUS_str_(r.allocation_draft_id),
+      CENSUS_low_(r.line_status), CENSUS_str_(r.sku)].join(R6R7_SEP2_);
+  }).sort();
+  o.relation_fingerprint = CENSUS_fp_(o.relations.map(function (r) {
+    return r.header_id + '>' + r.line_ids.join(','); }).join(R6R7_SEP_));
+  o.universe_fingerprint = CENSUS_fp_('u|' + tuples.sort().join(R6R7_SEP_) + '||' + lineTuples.join(R6R7_SEP_));
+  o.available = true;
+  o.note = 'the two frozen routes are covered field-by-field by their own full-row snapshots; this covers'
+    + ' EVERY OTHER row the scope can reach, at identity + status + provenance + relation grain.';
+  return o;
+}
+
+// ================================================================================================================
+// THE RESERVATION OBSERVATION CONTRACT. Four named states, and one of them is not an answer.
+//
+// R3 let `null === null` stand in for 'no reservation appeared' unless the count was comparable. That is the
+// same defect in a smaller place: a table we could not open is not a table with nothing in it. The state is
+// now declared, the authority that answered is named, and PRESENT_BUT_UNREADABLE is a STOP — a sheet that is
+// there and will not open is exactly the case where a guess is most tempting and least defensible.
+// ================================================================================================================
+var R6R7_RESERVATION_STATES_ = ['SHEET_ABSENT', 'SHEET_PRESENT_AND_READABLE', 'SHEET_PRESENT_BUT_UNREADABLE'];
+var R6R7_RESERVATION_SCOPE_COLUMNS_ = ['company', 'country', 'marketplace', 'sku'];
+var R6R7_RESERVATION_ID_COLUMNS_ = ['reservation_id', 'reservation_line_id', 'id'];
+
+function CENSUS_r6r7ReservationObservation_(ss, scope) {
+  var o = { table: R6R7_RESERVATION_TABLE_, observation_state: null, authority: null,
+    server_guarantee: false, row_count: null, column_names: [], scope_columns_present: [],
+    id_column: null, scoped_ids: [], scoped_count: null, scoped_fingerprint: null,
+    acceptable: false, reason: null };
+  try {
+    var man = (typeof weeklyAiPlanActivationManifest_ === 'function') ? weeklyAiPlanActivationManifest_() : null;
+    o.server_guarantee = !!man && (man.tables_guaranteed_zero_mutation || [])
+      .indexOf(R6R7_RESERVATION_TABLE_) !== -1;
+  } catch (eM) { o.server_guarantee = false; }
+
+  if (!ss) {
+    o.observation_state = 'SHEET_PRESENT_BUT_UNREADABLE';
+    o.authority = 'NONE';
+    o.reason = 'DB_NOT_OPENED: the database could not be opened, so nothing was observed. Not observing is'
+      + ' not the same as observing nothing.';
+    return o;
+  }
+  var sh = null;
+  try { sh = ss.getSheetByName(R6R7_RESERVATION_TABLE_); }
+  catch (eL) {
+    o.observation_state = 'SHEET_PRESENT_BUT_UNREADABLE'; o.authority = 'NONE';
+    o.reason = 'LOOKUP_THREW: ' + CENSUS_str_(eL && eL.message);
+    return o;
+  }
+  if (!sh) {
+    o.observation_state = 'SHEET_ABSENT';
+    o.authority = o.server_guarantee ? 'SERVER_MANIFEST_GUARANTEED_ZERO_MUTATION' : 'NONE';
+    o.acceptable = o.server_guarantee === true;
+    o.reason = o.server_guarantee
+      ? 'the table does not exist in this database, and 61_\'s own activation manifest lists it among the'
+        + ' tables a generation cannot mutate — a structural guarantee, not a count'
+      : 'the table does not exist AND 61_ does not declare it zero-mutation, so nothing carries this claim';
+    return o;
+  }
+  try {
+    var v = sh.getDataRange().getValues();
+    var names = ((v && v.length) ? v[0] : []).map(function (h) { return CENSUS_str_(h); });
+    while (names.length && names[names.length - 1] === '') names.pop();
+    o.observation_state = 'SHEET_PRESENT_AND_READABLE';
+    o.authority = 'OBSERVED_ROWS';
+    o.acceptable = true;
+    o.column_names = names;
+    o.row_count = Math.max(0, (v ? v.length : 0) - 1);
+    o.scope_columns_present = R6R7_RESERVATION_SCOPE_COLUMNS_.filter(function (c) { return names.indexOf(c) !== -1; });
+    for (var i = 0; i < R6R7_RESERVATION_ID_COLUMNS_.length; i++) {
+      if (names.indexOf(R6R7_RESERVATION_ID_COLUMNS_[i]) !== -1) { o.id_column = R6R7_RESERVATION_ID_COLUMNS_[i]; break; }
+    }
+    var idx = {}; names.forEach(function (n, k) { idx[n] = k; });
+    var rows = [];
+    for (var r = 1; r < (v ? v.length : 0); r++) {
+      var row = v[r] || [], blank = true;
+      for (var c = 0; c < names.length; c++) { if (CENSUS_str_(row[c]) !== '') { blank = false; break; } }
+      if (blank) continue;
+      var inScope = true;
+      o.scope_columns_present.forEach(function (col) {
+        if (CENSUS_low_(row[idx[col]]) !== CENSUS_low_(scope[col])) inScope = false;
+      });
+      if (!inScope) continue;
+      var parts = names.map(function (n, k) { return n + '=' + CENSUS_r6r7NormCell_(n, row[k]); });
+      rows.push({ id: o.id_column ? CENSUS_str_(row[idx[o.id_column]]) : ('ROW_' + r),
+        fingerprint: CENSUS_fp_(R6R7_RESERVATION_TABLE_ + '|' + parts.join(R6R7_SEP_)) });
+    }
+    rows.sort(function (a, b) { return a.id < b.id ? -1 : (a.id > b.id ? 1 : 0); });
+    o.scoped_ids = rows.map(function (x) { return x.id; });
+    o.scoped_count = rows.length;
+    o.scoped_fingerprint = CENSUS_fp_(rows.map(function (x) { return x.id + '=' + x.fingerprint; }).join(R6R7_SEP_));
+    if (!o.scope_columns_present.length) {
+      o.reason = 'NO_SCOPE_COLUMN_ON_THIS_TABLE: none of ' + R6R7_RESERVATION_SCOPE_COLUMNS_.join('/')
+        + ' exists here, so the WHOLE table is the observation rather than a scoped slice';
+    }
+  } catch (e) {
+    o.observation_state = 'SHEET_PRESENT_BUT_UNREADABLE';
+    o.authority = 'NONE';
+    o.acceptable = false;
+    o.row_count = null;
+    o.reason = 'UNREADABLE: ' + CENSUS_str_(e && e.message) + ' — the sheet exists and will not open. This'
+      + ' STOPs: a count we could not read is not a count of zero.';
+  }
+  return o;
+}
+
+/** Both allocation tables, raw, in one place, so the snapshot, the universe and the row lookups all read the
+ *  same values rather than three reads that could disagree. */
+function CENSUS_r6r7RawTables_(ss) {
+  if (!ss) return { readable: false, reason: 'DB_NOT_OPENED', headers: [], lines: [] };
+  try {
+    var h = CENSUS_rows_(ss, R6R7_SCHEMA_TABLES_.header);
+    var l = CENSUS_rows_(ss, R6R7_SCHEMA_TABLES_.line);
+    return { readable: true, reason: null, headers: h, lines: l };
+  } catch (e) {
+    return { readable: false, reason: 'UNREADABLE: ' + CENSUS_str_(e && e.message), headers: [], lines: [] };
+  }
+}
+function CENSUS_r6r7RawFind_(rows, field, id) {
+  return (rows || []).filter(function (r) { return CENSUS_str_(r[field]) === CENSUS_str_(id); });
+}
+
+/** The frozen BEFORE. Everything below `frozen_by` is a LIVE fact only a run can supply, and the manifest
+ *  prints the exact block to paste here. While any REQUIRED one is null the readback answers
+ *  BASELINE_NOT_FROZEN — it will not prove stillness against a baseline it does not have. */
 var R6R7_NO_ACTION_BEFORE_ = {
   frozen_by: null,                 // who pasted it, and when they ran the manifest
   frozen_at: null,
@@ -6419,16 +6869,42 @@ var R6R7_NO_ACTION_BEFORE_ = {
   calculated_at: null,
   calculation_status: null,
   freshness_state: null,
-  windows: null,                   // { d18, d30, d45, d90 } as stored
+  windows: null,                   // { D18, D30, D45, D90 } as stored
   recommended_qty: null,
   qualifying_active_planned_qty: null,
   residual_qty: null,
+  // ---- R3-P1: the schema the snapshots were taken against. A snapshot compared across a schema change is
+  //      comparing two different tables, so the schema is frozen alongside the rows.
+  header_schema_version: null,
+  header_column_count: null,
+  header_column_names_fingerprint: null,
+  line_schema_version: null,
+  line_column_count: null,
+  line_column_names_fingerprint: null,
+  // ---- R3-P1: the full rows. Four snapshots, every canonical column, and three fingerprints per route.
+  route_a_header_snapshot: null,
+  route_a_line_snapshot: null,
+  route_a_header_full_fingerprint: null,
+  route_a_line_full_fingerprint: null,
+  route_a_combined_full_fingerprint: null,
+  route_b_header_snapshot: null,
+  route_b_line_snapshot: null,
+  route_b_header_full_fingerprint: null,
+  route_b_line_full_fingerprint: null,
+  route_b_combined_full_fingerprint: null,
+  // The R3 route-view fingerprints are KEPT, and they are not the byte-identical claim any more. They cover
+  // eighteen fields of the page's projection; the full-row ones above cover all 36 + 31 columns. Both are
+  // reported because a disagreement between them is itself information.
   route_a_fingerprint: null,
   route_a_updated_at: null,
   route_a_line_updated_at: null,
   route_b_fingerprint: null,
   route_b_updated_at: null,
   route_b_line_updated_at: null,
+  // ---- R3-P1: every id the scope can reach, at any status, and the relation between them.
+  identity_universe: null,
+  // ---- R3-P1: the reservation observation, as a named state rather than a nullable count.
+  reservation_observation: null,
   manual_header_ids: null,
   manual_line_ids: null,
   active_ai_headers: null,
@@ -6440,6 +6916,13 @@ var R6R7_NO_ACTION_BEFORE_ = {
 };
 var R6R7_BEFORE_REQUIRED_ = ['frozen_at', 'calculation_run_id', 'calculation_date', 'calculation_status',
   'freshness_state', 'recommended_qty', 'qualifying_active_planned_qty', 'residual_qty',
+  'header_schema_version', 'header_column_count', 'header_column_names_fingerprint',
+  'line_schema_version', 'line_column_count', 'line_column_names_fingerprint',
+  'route_a_header_snapshot', 'route_a_line_snapshot',
+  'route_a_header_full_fingerprint', 'route_a_line_full_fingerprint', 'route_a_combined_full_fingerprint',
+  'route_b_header_snapshot', 'route_b_line_snapshot',
+  'route_b_header_full_fingerprint', 'route_b_line_full_fingerprint', 'route_b_combined_full_fingerprint',
+  'identity_universe', 'reservation_observation',
   'route_a_fingerprint', 'route_a_updated_at', 'route_a_line_updated_at',
   'route_b_fingerprint', 'route_b_updated_at', 'route_b_line_updated_at',
   'active_ai_headers', 'active_ai_lines'];
@@ -6460,8 +6943,9 @@ function CENSUS_fp_(s) {
   return ('0000000' + h.toString(16)).slice(-8);
 }
 
-// The fields a route's identity and its business meaning are made of, in a FIXED order. Order is part of the
-// contract: a fingerprint over an unordered object is not reproducible.
+// The fields the PAGE's route projection is made of, in a FIXED order. Order is part of the contract: a
+// fingerprint over an unordered object is not reproducible. This is the ROUTE-VIEW fingerprint and it is
+// deliberately NOT the byte-identical claim — see CENSUS_r6r7RouteFullSnapshot_ for that.
 var R6R7_FP_FIELDS_ = ['allocation_draft_id', 'allocation_draft_line_id', 'status', 'line_status',
   'draft_version', 'quantity', 'shipping_method', 'last_mile_delivery', 'source_warehouse_id',
   'destination_marketplace', 'k4_group_key', 'recommendation_group_no', 'generation_type',
@@ -6472,13 +6956,11 @@ function CENSUS_r6r7RouteFingerprint_(row) {
   var parts = R6R7_FP_FIELDS_.map(function (f) {
     return f + '=' + CENSUS_str_(row[f] === undefined ? '' : row[f]);
   });
-  return CENSUS_fp_(parts.join('\u0001'));
+  return CENSUS_fp_(parts.join(R6R7_SEP_));
 }
 
-/** A bounded row count for a table this census does not otherwise read. Used for `reservations`, where the
- *  question is only ever 'did one appear?' — so a count is the whole answer and the columns do not matter.
- *  Returns null with a reason rather than 0 when the sheet cannot be read: a table we could not open is not
- *  a table with nothing in it. */
+/** A bounded row count for a table this census does not otherwise read. Returns null with a reason rather
+ *  than 0 when the sheet cannot be read: a table we could not open is not a table with nothing in it. */
 function CENSUS_r6r7RowCount_(ss, name) {
   try {
     var sh = ss.getSheetByName(name);
@@ -6508,6 +6990,19 @@ function CENSUS_r6r7Deployment_() {
   }
 }
 
+/** A long block, emitted in NAMED bounded chunks rather than one line the Logger will cut. Every chunk says
+ *  which of how many it is, so a reader can tell a complete paste block from a truncated one. */
+var R6R7_CHUNK_MAX_BYTES_ = 3000;
+function CENSUS_r6r7EmitChunked_(label, text, maxBytes) {
+  var s = String(text == null ? '' : text);
+  var n = Math.max(1, maxBytes || R6R7_CHUNK_MAX_BYTES_);
+  var total = Math.max(1, Math.ceil(s.length / n));
+  for (var i = 0; i < total; i++) {
+    CENSUS_log_(label + '_' + (i + 1) + '_of_' + total, s.slice(i * n, (i + 1) * n));
+  }
+  return total;
+}
+
 // ================================================================================================================
 // R6-R7-R3 — THE MANIFEST A PERSON AUTHORIZES FROM. Read-only, no arguments, one hard-coded scope.
 //
@@ -6525,6 +7020,8 @@ function RUN_R6R7_CONTROLLED_NO_ACTION_ACTIVATION_MANIFEST() {
     scope: R6R7_SCOPE_,
     predicates: [], predicates_passed: 0, predicates_failed: 0,
     deployment: null, flag: null, allowlist: null,
+    schema_authority: null, live_schema: null, normalizers: null,
+    identity_universe: null, reservation_observation: null,
     frozen_before: null, freeze_paste_block: null,
     production_path: null, parity: null,
     activation_steps: null, rollback: null, browser_audit: null,
@@ -6654,8 +7151,77 @@ function RUN_R6R7_CONTROLLED_NO_ACTION_ACTIVATION_MANIFEST() {
 
   var ssR = null;
   try { ssR = SpreadsheetApp.openById(prodExpectedDbId_()); } catch (eS) { ssR = null; }
-  var reservations = ssR ? CENSUS_r6r7RowCount_(ssR, 'reservations')
-    : { table: 'reservations', row_count: null, reason: 'DB_NOT_OPENED' };
+  var reservations = ssR ? CENSUS_r6r7RowCount_(ssR, R6R7_RESERVATION_TABLE_)
+    : { table: R6R7_RESERVATION_TABLE_, row_count: null, reason: 'DB_NOT_OPENED' };
+
+  // ---- 7b. R3-P1 — THE FULL ROWS, THE SCHEMA THEY WERE TAKEN AGAINST, AND EVERY ID THE SCOPE CAN REACH. ----
+  out.schema_authority = CENSUS_r6r7SchemaAuthority_();
+  out.normalizers = CENSUS_r6r7NormalizerAuthority_();
+  P('schema_authority_is_readable', true, out.schema_authority.available,
+    out.schema_authority.available === true);
+  P('normalizers_are_the_project_authorities', [], out.normalizers.missing,
+    out.normalizers.available === true);
+  out.live_schema = CENSUS_r6r7LiveSchema_(ssR, out.schema_authority);
+  var lsH = out.live_schema.header, lsL = out.live_schema.line;
+  P('header_schema_is_a_recognized_generation', 'a named generation', lsH.schema_version,
+    !!lsH.schema_version);
+  P('header_live_columns_equal_the_canonical_authority', out.schema_authority.header.column_count,
+    lsH.live_column_count, lsH.live_column_count === out.schema_authority.header.column_count);
+  P('header_column_names_match_the_authority_byte_for_byte',
+    out.schema_authority.header.names_fingerprint, lsH.live_names_fingerprint,
+    lsH.live_names_fingerprint === out.schema_authority.header.names_fingerprint);
+  P('line_schema_is_resolvable', 'a resolvable line schema', lsL.schema_version, !!lsL.schema_version);
+  P('line_live_columns_equal_the_canonical_authority', out.schema_authority.line.column_count,
+    lsL.live_column_count, lsL.live_column_count === out.schema_authority.line.column_count);
+  P('line_column_names_match_the_authority_byte_for_byte',
+    out.schema_authority.line.names_fingerprint, lsL.live_names_fingerprint,
+    lsL.live_names_fingerprint === out.schema_authority.line.names_fingerprint);
+
+  var raw = CENSUS_r6r7RawTables_(ssR);
+  P('both_allocation_tables_were_read', true, raw.readable, raw.readable === true);
+  var full = {};
+  R6R7_MANUAL_ROUTES_.forEach(function (m) {
+    var hh = CENSUS_r6r7RawFind_(raw.headers, 'allocation_draft_id', m.allocation_draft_id);
+    var ll = CENSUS_r6r7RawFind_(raw.lines, 'allocation_draft_line_id', m.allocation_draft_line_id);
+    var f = CENSUS_r6r7RouteFullSnapshot_(out.schema_authority, out.live_schema,
+      hh.length === 1 ? hh[0] : null, ll.length === 1 ? ll[0] : null);
+    full[m.label] = f;
+    P('route_' + m.label + '_raw_header_row_found_exactly_once', 1, hh.length, hh.length === 1);
+    P('route_' + m.label + '_raw_line_row_found_exactly_once', 1, ll.length, ll.length === 1);
+    P('route_' + m.label + '_full_row_snapshot_covers_every_canonical_column',
+      f.canonical_field_count, f.covered_field_count,
+      f.covered_field_count === f.canonical_field_count && f.canonical_field_count > 0);
+    // §一.7 — a technical exclusion is a STOP, not a footnote. A narrower claim reported under the same
+    // words as the full one is the exact defect this round exists to close.
+    P('route_' + m.label + '_excluded_no_field_from_the_byte_identical_claim', [], f.excluded_fields,
+      f.excluded_fields.length === 0);
+    P('route_' + m.label + '_has_all_three_full_fingerprints', 'header + line + combined',
+      [f.header_full_fingerprint, f.line_full_fingerprint, f.combined_full_fingerprint],
+      !!f.header_full_fingerprint && !!f.line_full_fingerprint && !!f.combined_full_fingerprint);
+  });
+  P('the_two_routes_are_different_rows',
+    'two distinct combined fingerprints',
+    [full.A ? full.A.combined_full_fingerprint : null, full.B ? full.B.combined_full_fingerprint : null],
+    !!full.A && !!full.B && full.A.combined_full_fingerprint !== full.B.combined_full_fingerprint);
+
+  out.identity_universe = CENSUS_r6r7IdentityUniverse_(raw, R6R7_SCOPE_);
+  P('identity_universe_is_freezable', true, out.identity_universe.available,
+    out.identity_universe.available === true);
+  P('identity_universe_holds_both_manual_headers', manualIds.slice().sort(),
+    out.identity_universe.header_ids,
+    manualIds.every(function (id) { return out.identity_universe.header_ids.indexOf(id) !== -1; }));
+  P('no_active_ai_header_exists_in_the_universe', [], out.identity_universe.active_ai_header_ids,
+    out.identity_universe.active_ai_header_ids.length === 0);
+
+  out.reservation_observation = CENSUS_r6r7ReservationObservation_(ssR, R6R7_SCOPE_);
+  P('reservation_observation_state_is_named', R6R7_RESERVATION_STATES_,
+    out.reservation_observation.observation_state,
+    R6R7_RESERVATION_STATES_.indexOf(out.reservation_observation.observation_state) !== -1);
+  // PRESENT_BUT_UNREADABLE is the one state that cannot be worked around: the table is there and will not
+  // open, so neither a count nor a structural guarantee describes what is in it.
+  P('reservation_table_is_not_present_but_unreadable', 'readable, or absent with a server guarantee',
+    out.reservation_observation.observation_state + ' / ' + out.reservation_observation.authority,
+    out.reservation_observation.acceptable === true);
 
   out.frozen_before = {
     // The canonical timestamp authority, or NOTHING. A clock read here would be a fabricated data value on
@@ -6672,12 +7238,30 @@ function RUN_R6R7_CONTROLLED_NO_ACTION_ACTIVATION_MANIFEST() {
     qualifying_active_planned_qty: pp.qualifying_active_planned_qty === undefined
       ? null : pp.qualifying_active_planned_qty,
     residual_qty: pp.residual_qty === undefined ? null : pp.residual_qty,
+    header_schema_version: lsH.schema_version,
+    header_column_count: lsH.live_column_count,
+    header_column_names_fingerprint: lsH.live_names_fingerprint,
+    line_schema_version: lsL.schema_version,
+    line_column_count: lsL.live_column_count,
+    line_column_names_fingerprint: lsL.live_names_fingerprint,
+    route_a_header_snapshot: full.A ? full.A.header_snapshot : null,
+    route_a_line_snapshot: full.A ? full.A.line_snapshot : null,
+    route_a_header_full_fingerprint: full.A ? full.A.header_full_fingerprint : null,
+    route_a_line_full_fingerprint: full.A ? full.A.line_full_fingerprint : null,
+    route_a_combined_full_fingerprint: full.A ? full.A.combined_full_fingerprint : null,
+    route_b_header_snapshot: full.B ? full.B.header_snapshot : null,
+    route_b_line_snapshot: full.B ? full.B.line_snapshot : null,
+    route_b_header_full_fingerprint: full.B ? full.B.header_full_fingerprint : null,
+    route_b_line_full_fingerprint: full.B ? full.B.line_full_fingerprint : null,
+    route_b_combined_full_fingerprint: full.B ? full.B.combined_full_fingerprint : null,
     route_a_fingerprint: CENSUS_r6r7RouteFingerprint_(snap.A),
     route_a_updated_at: snap.A ? CENSUS_str_(snap.A.updated_at) : null,
     route_a_line_updated_at: snap.A ? CENSUS_str_(snap.A.line_updated_at) : null,
     route_b_fingerprint: CENSUS_r6r7RouteFingerprint_(snap.B),
     route_b_updated_at: snap.B ? CENSUS_str_(snap.B.updated_at) : null,
     route_b_line_updated_at: snap.B ? CENSUS_str_(snap.B.line_updated_at) : null,
+    identity_universe: out.identity_universe,
+    reservation_observation: out.reservation_observation,
     manual_header_ids: (prov.sku_contributing_header_ids || []).slice().sort(),
     manual_line_ids: (prov.sku_contributing_line_ids || []).slice().sort(),
     manual_planned_total: total,
@@ -6686,29 +7270,18 @@ function RUN_R6R7_CONTROLLED_NO_ACTION_ACTIVATION_MANIFEST() {
     reservation_row_count: reservations.row_count,
     reservation_read: reservations
   };
-  // THE BLOCK A PERSON PASTES. A readback that recomputed this would compare a state with itself.
+  // THE BLOCK A PERSON PASTES. A readback that recomputed this would compare a state with itself. It carries
+  // the full field maps because a fingerprint alone can say a row moved and cannot say which column did.
+  var freeze = {};
+  R6R7_BEFORE_REQUIRED_.forEach(function (k) { freeze[k] = out.frozen_before[k]; });
+  freeze.calculated_at = out.frozen_before.calculated_at;
+  freeze.windows = out.frozen_before.windows;
+  freeze.manual_header_ids = out.frozen_before.manual_header_ids;
+  freeze.manual_line_ids = out.frozen_before.manual_line_ids;
+  freeze.manual_planned_total = out.frozen_before.manual_planned_total;
+  freeze.reservation_row_count = out.frozen_before.reservation_row_count;
   out.freeze_paste_block = 'Paste these into R6R7_NO_ACTION_BEFORE_ in this file BEFORE pressing Generate: '
-    + JSON.stringify({
-      frozen_at: out.frozen_before.frozen_at,
-      calculation_run_id: out.frozen_before.calculation_run_id,
-      calculation_date: out.frozen_before.calculation_date,
-      calculated_at: out.frozen_before.calculated_at,
-      calculation_status: out.frozen_before.calculation_status,
-      freshness_state: out.frozen_before.freshness_state,
-      windows: out.frozen_before.windows,
-      recommended_qty: out.frozen_before.recommended_qty,
-      qualifying_active_planned_qty: out.frozen_before.qualifying_active_planned_qty,
-      residual_qty: out.frozen_before.residual_qty,
-      route_a_fingerprint: out.frozen_before.route_a_fingerprint,
-      route_a_updated_at: out.frozen_before.route_a_updated_at,
-      route_a_line_updated_at: out.frozen_before.route_a_line_updated_at,
-      route_b_fingerprint: out.frozen_before.route_b_fingerprint,
-      route_b_updated_at: out.frozen_before.route_b_updated_at,
-      route_b_line_updated_at: out.frozen_before.route_b_line_updated_at,
-      active_ai_headers: out.frozen_before.active_ai_headers,
-      active_ai_lines: out.frozen_before.active_ai_lines,
-      reservation_row_count: out.frozen_before.reservation_row_count
-    });
+    + JSON.stringify(freeze);
 
   // ---- 8. THIS FILE WROTE NOTHING AND CANNOT FLIP THE FLAG. -------------------------------------------------
   P('writer_not_constructed', false, out.writer_constructed, out.writer_constructed === false);
@@ -6758,11 +7331,101 @@ var R6R7_BROWSER_BASELINE_SNIPPET_ = [
   '})();'
 ].join('\n');
 
-var R6R7_BROWSER_DELTA_SNIPPET_ = [
-  '// RUN AFTER EXACTLY ONE CLICK. Reports only what happened after the baseline.',
-  '(function () {',
+// ================================================================================================================
+// R3-P1 §五 — THE SINGLE-USE RESPONSE CAPTURE.
+//
+// The timeline records that a request happened and how it ended. It does not hold the response BODY, so a
+// readback that read `phase: SUCCESS` and then described 61_'s recomputed decision as 'the response' was
+// describing something nobody had seen. This wrapper is the only way to hold the actual reply without
+// touching the production frontend, and every property below is a constraint on being harmless:
+//
+//   it wraps ONE function and restores it the moment it has an answer, on resolve, on reject and on a
+//   timeout; it forwards `this` and `arguments` untouched so the payload is byte-for-byte the page's own; it
+//   adds no request of its own; it captures at most once; and a SECOND call is REJECTED rather than passed
+//   through, because a second generation is the one thing this activation must not do by accident. Silence
+//   would be worse than the block: a second click that quietly succeeded is an unexplained row.
+// ================================================================================================================
+var R6R7_CAPTURE_TIMEOUT_MS_ = 180000;
+var R6R7_BROWSER_CAPTURE_SNIPPET_ = [
+  '// INSTALL BEFORE PRESSING GENERATE. Single-USE, adds no request, changes no payload. It stays armed',
+  '// against a second Generate until the AUDIT snippet releases it and puts the original function back.',
+  'window.__R6R7_CAPTURE = (function () {',
+  '  var host = (window.KM && KM.DB) || null, name = "generateWeeklyAiPlanDraft";',
+  '  if (!host || typeof host[name] !== "function") {',
+  '    var e = { installed: false, reason: "NOT_A_FUNCTION: KM.DB." + name + " is not callable here" };',
+  '    console.log(JSON.stringify(e)); return e; }',
+  '  if (host[name].__r6r7_wrapped) {',
+  '    var a = { installed: false, reason: "ALREADY_INSTALLED: do not install twice. Reload the page and start clean." };',
+  '    console.log(JSON.stringify(a)); return a; }',
+  '  var orig = host[name];',
+  '  var state = { installed: true, calls: 0, captured: false, restored: false, blocked_second_call: false,',
+  '    armed_against_second_call: true, timeout_ms: ' + R6R7_CAPTURE_TIMEOUT_MS_ + ' };',
+  '  window.__R6R7_ACTUAL_RESPONSE = { captured: false, reason: "NOT_YET_CALLED" };',
+  '  function n(v) { return (v === undefined || v === null) ? null : v; }',
+  '  // PUTS THE PAGE BACK. Called by the audit snippet once it has read the response, and by the',
+  '  // timeout, so nothing is left patched — but NOT on capture, because a wrapper that removes',
+  '  // itself the instant it has an answer cannot refuse the second click.',
+  '  function release() { state.armed_against_second_call = false;',
+  '    if (host[name] === wrapped) { host[name] = orig; state.restored = true; }',
+  '    return state; }',
+  '  state.release = release;',
+  '  // SANITIZED BY WHITELIST. Only these fields are read out of the envelope, so no token, no header and no',
+  '  // full payload can be carried into a pasted audit by accident.',
+  '  function pick(res) {',
+  '    var r = res || {}, d = r.data || {}, s = d.summary || d.counters || d.written || {};',
+  '    var err = (r.errors && r.errors[0]) || {};',
+  '    return { captured: true, resolved_or_rejected: "resolved", action: "weeklyAiPlan.generate",',
+  '      response_outcome: n(d.outcome), response_code: n(err.code !== undefined ? err.code : d.code),',
+  '      no_action_reason: n(d.no_action_reason), recommendation_state: n(d.recommendation_state),',
+  '      recommended_qty: n(d.recommended_qty), qualifying_planned_qty: n(d.qualifying_planned_qty),',
+  '      residual_qty: n(d.residual_qty),',
+  '      created_headers: n(s.created_headers), created_lines: n(s.created_lines),',
+  '      updated_headers: n(s.updated_headers), updated_lines: n(s.updated_lines),',
+  '      cancelled_headers: n(s.cancelled_headers), cancelled_lines: n(s.cancelled_lines),',
+  '      reservations: n(s.reservations), db_writes: n(d.db_writes !== undefined ? d.db_writes : s.db_writes),',
+  '      writer_reached: n(d.writer_reached), routes_count: (d.routes || []).length,',
+  '      groups_count: (d.groups || []).length, error_code: n(err.code) }; }',
+  '  function wrapped() {',
+  '    state.calls++;',
+  '    if (state.calls > 1) {',
+  '      state.blocked_second_call = true;',
+  '      var b = { blocked: true, call: state.calls, reason: "SECOND_GENERATION_CALL_BLOCKED: this activation'
+    + ' presses Generate exactly once. A replay is verified by READING the database, never by pressing." };',
+  '      console.log(JSON.stringify(b));',
+  '      return Promise.reject(new Error("R6R7_SECOND_GENERATION_CALL_BLOCKED")); }',
+  '    var self = this, args = arguments, r;',
+  '    try { r = orig.apply(self, args); }',
+  '    catch (sync) {',
+  '      window.__R6R7_ACTUAL_RESPONSE = { captured: false, resolved_or_rejected: "threw",',
+  '        error_code: String((sync && sync.message) || sync).slice(0, 200) };',
+  '      throw sync; }',
+  '    if (!r || typeof r.then !== "function") {',
+  '      state.captured = true; window.__R6R7_ACTUAL_RESPONSE = pick(r); return r; }',
+  '    return r.then(function (res) {',
+  '      state.captured = true; window.__R6R7_ACTUAL_RESPONSE = pick(res); return res;',
+  '    }, function (err) {',
+  '      window.__R6R7_ACTUAL_RESPONSE = { captured: false, resolved_or_rejected: "rejected",',
+  '        error_code: String((err && (err.code || err.message)) || err).slice(0, 200) };',
+  '      throw err; }); }',
+  '  wrapped.__r6r7_wrapped = true;',
+  '  host[name] = wrapped;',
+  '  setTimeout(function () {',
+  '    if (state.captured) { release(); return; }',
+  '    release();',
+  '    if (state.calls === 0) { window.__R6R7_ACTUAL_RESPONSE = { captured: false, reason: "NOT_CALLED_BEFORE_TIMEOUT" }; }',
+  '    else { window.__R6R7_ACTUAL_RESPONSE = { captured: false, resolved_or_rejected: "timeout",',
+  '      reason: "NO_ANSWER_BEFORE_TIMEOUT: do NOT press Generate again. Run the database readback." }; }',
+  '  }, state.timeout_ms);',
+  '  console.log(JSON.stringify(state));',
+  '  return state;',
+  '})();'
+].join('\n');
+
+// The delta body, written ONCE. The standalone delta snippet and the merged audit snippet both wrap these
+// lines, so the two can never drift into computing the delta differently.
+var R6R7_DELTA_BODY_LINES_ = [
   '  var b = window.__R6R7_BASELINE;',
-  '  if (!b) { var nb = { verdict: "STOP", reason: "NO_BASELINE: the baseline snippet was not run before the click, so no delta can be computed. Do not press Generate again; run the database readback." }; console.log(JSON.stringify(nb)); return nb; }',
+  '  if (!b) { return { verdict: "STOP", reason: "NO_BASELINE: the baseline snippet was not run before the click, so no delta can be computed. Do not press Generate again; run the database readback." }; }',
   '  var t = KM.transport.timeline();',
   '  var since = t.request_timeline.filter(function (r) { return r.seq > b.max_seq; });',
   '  var writes = since.filter(function (r) { return r.kind === "write"; });',
@@ -6789,36 +7452,186 @@ var R6R7_BROWSER_DELTA_SNIPPET_ = [
   '  };',
   '  out.verdict = (out.exactly_one_generation_request && out.new_mutation_requests === 1)',
   '    ? "ONE_GENERATION_REQUEST" : "STOP";',
-  '  console.log(JSON.stringify(out, null, 2));',
-  '  return out;',
+  '  return out;'
+];
+
+// The standalone delta. It wraps the shared body and logs whatever the body returned — including the
+// NO_BASELINE refusal, which is a result an operator must be able to read rather than a silent return.
+var R6R7_BROWSER_DELTA_SNIPPET_ = [
+  '// RUN AFTER EXACTLY ONE CLICK. Reports only what happened after the baseline.',
+  '(function () {',
+  '  var d = (function () {'
+].concat(R6R7_DELTA_BODY_LINES_.map(function (l) { return '  ' + l; })).concat([
+  '  })();',
+  '  console.log(JSON.stringify(d, null, 2));',
+  '  return d;',
   '})();'
-].join('\n');
+]).join('\n');
 
 // ================================================================================================================
-// THE TWELVE STEPS, AS DATA. Written down so the person doing them and the person reading the result are
-// following the same list, and so a step that was skipped is a missing line rather than a memory.
+// R3-P1 §五 — THE MERGED AUDIT. One object holding the three browser-side facts, plus the paste block.
+//
+// A timeline phase of SUCCESS is NOT a response body. The audit says so in a field rather than in a comment:
+// response_body_inferred_from_timeline is false, and with no capture the verdict is
+// ACTUAL_RESPONSE_NOT_CAPTURED — which the readback then refuses to accept as CONFIRMED.
+// ================================================================================================================
+var R6R7_BROWSER_AUDIT_SNIPPET_ = ['// RUN AFTER THE CLICK. Merges the transport delta, the captured response and the capture state.',
+  'window.__R6R7_BROWSER_AUDIT = (function () {',
+  '  var delta = (function () {'].concat(R6R7_DELTA_BODY_LINES_.map(function (l) { return '  ' + l; }))
+  .concat([
+    '  })();',
+    '  // Put the page back first: the capture stays armed against a second Generate until exactly here.',
+    '  var cap0 = window.__R6R7_CAPTURE || null;',
+    '  if (cap0 && typeof cap0.release === "function") cap0.release();',
+    '  var resp = window.__R6R7_ACTUAL_RESPONSE || { captured: false, reason: "CAPTURE_NEVER_INSTALLED" };',
+    '  var cap = window.__R6R7_CAPTURE || { installed: false, reason: "CAPTURE_NEVER_INSTALLED" };',
+    '  var a = {',
+    '    delta: delta, actual_response: resp,',
+    '    capture: { installed: cap.installed === true, calls: cap.calls === undefined ? null : cap.calls,',
+    '      captured: cap.captured === true, restored: cap.restored === true,',
+    '      blocked_second_call: cap.blocked_second_call === true, reason: cap.reason || null },',
+    '    response_body_inferred_from_timeline: false,',
+    '    note: "a timeline phase of SUCCESS says a request finished, not what the body said. Without a'
+      + ' capture there is no response, and this audit will not pretend otherwise."',
+    '  };',
+    '  a.verdict = (resp.captured !== true) ? "ACTUAL_RESPONSE_NOT_CAPTURED"',
+    '    : (delta.verdict === "ONE_GENERATION_REQUEST" ? "ONE_GENERATION_REQUEST_AND_RESPONSE_CAPTURED" : "STOP");',
+    '  a.paste_block = JSON.stringify({',
+    '    captured: resp.captured === true, resolved_or_rejected: resp.resolved_or_rejected || null,',
+    '    action: resp.action || null, response_outcome: resp.response_outcome === undefined ? null : resp.response_outcome,',
+    '    response_code: resp.response_code === undefined ? null : resp.response_code,',
+    '    no_action_reason: resp.no_action_reason === undefined ? null : resp.no_action_reason,',
+    '    recommendation_state: resp.recommendation_state === undefined ? null : resp.recommendation_state,',
+    '    recommended_qty: resp.recommended_qty === undefined ? null : resp.recommended_qty,',
+    '    qualifying_planned_qty: resp.qualifying_planned_qty === undefined ? null : resp.qualifying_planned_qty,',
+    '    residual_qty: resp.residual_qty === undefined ? null : resp.residual_qty,',
+    '    created_headers: resp.created_headers === undefined ? null : resp.created_headers,',
+    '    created_lines: resp.created_lines === undefined ? null : resp.created_lines,',
+    '    updated_headers: resp.updated_headers === undefined ? null : resp.updated_headers,',
+    '    updated_lines: resp.updated_lines === undefined ? null : resp.updated_lines,',
+    '    cancelled_headers: resp.cancelled_headers === undefined ? null : resp.cancelled_headers,',
+    '    cancelled_lines: resp.cancelled_lines === undefined ? null : resp.cancelled_lines,',
+    '    reservations: resp.reservations === undefined ? null : resp.reservations,',
+    '    db_writes: resp.db_writes === undefined ? null : resp.db_writes,',
+    '    writer_reached: resp.writer_reached === undefined ? null : resp.writer_reached,',
+    '    routes_count: resp.routes_count === undefined ? null : resp.routes_count,',
+    '    groups_count: resp.groups_count === undefined ? null : resp.groups_count,',
+    '    error_code: resp.error_code === undefined ? null : resp.error_code,',
+    '    baseline_max_seq: delta.baseline_max_seq === undefined ? null : delta.baseline_max_seq,',
+    '    new_requests: delta.new_requests === undefined ? null : delta.new_requests,',
+    '    new_mutation_requests: delta.new_mutation_requests === undefined ? null : delta.new_mutation_requests,',
+    '    generation_requests: delta.generation_requests === undefined ? null : delta.generation_requests,',
+    '    exactly_one_generation_request: delta.exactly_one_generation_request === undefined ? null : delta.exactly_one_generation_request,',
+    '    unexpected_mutations: delta.unexpected_mutations || null,',
+    '    route_save_requests: delta.route_save_requests === undefined ? null : delta.route_save_requests,',
+    '    submit_requests: delta.submit_requests === undefined ? null : delta.submit_requests,',
+    '    reservation_requests: delta.reservation_requests === undefined ? null : delta.reservation_requests,',
+    '    capture_installed: a.capture.installed, capture_calls: a.capture.calls,',
+    '    capture_restored: a.capture.restored, capture_blocked_second_call: a.capture.blocked_second_call,',
+    '    audit_verdict: a.verdict',
+    '  });',
+    '  console.log(JSON.stringify(a, null, 2));',
+    '  console.log("PASTE THIS into R6R7_ACTUAL_BROWSER_RESPONSE_ in the census: " + a.paste_block);',
+    '  return a;',
+    '})();'
+  ]).join('\n');
+
+// ================================================================================================================
+// R3-P1 §六 — WHAT THE BROWSER ACTUALLY RECEIVED, pasted in by a person.
+//
+// Apps Script has no way to reach the browser, so this is the only honest channel: the audit snippet prints a
+// sanitized block and a person pastes it here. Until they do, every field is null, `supplied_by_operator` is
+// false, and the readback answers AWAITING_BROWSER_AUDIT rather than CONFIRMED. An empty constant is not an
+// empty result.
+// ================================================================================================================
+var R6R7_ACTUAL_BROWSER_RESPONSE_ = {
+  pasted_by: null,
+  captured: null, resolved_or_rejected: null, action: null,
+  response_outcome: null, response_code: null, no_action_reason: null, recommendation_state: null,
+  recommended_qty: null, qualifying_planned_qty: null, residual_qty: null,
+  created_headers: null, created_lines: null, updated_headers: null, updated_lines: null,
+  cancelled_headers: null, cancelled_lines: null, reservations: null,
+  db_writes: null, writer_reached: null, routes_count: null, groups_count: null, error_code: null,
+  baseline_max_seq: null, new_requests: null, new_mutation_requests: null,
+  generation_requests: null, exactly_one_generation_request: null, unexpected_mutations: null,
+  route_save_requests: null, submit_requests: null, reservation_requests: null,
+  capture_installed: null, capture_calls: null, capture_restored: null, capture_blocked_second_call: null,
+  audit_verdict: null
+};
+// A `false` and a `0` are ANSWERS. Only null, undefined and '' mean nobody pasted anything.
+var R6R7_ACTUAL_RESPONSE_REQUIRED_ = ['captured', 'response_outcome', 'response_code',
+  'recommended_qty', 'qualifying_planned_qty', 'residual_qty',
+  'created_headers', 'created_lines', 'updated_headers', 'updated_lines',
+  'cancelled_headers', 'cancelled_lines', 'db_writes', 'writer_reached',
+  'routes_count', 'groups_count',
+  'exactly_one_generation_request', 'new_mutation_requests', 'generation_requests',
+  'capture_installed', 'capture_restored'];
+
+function CENSUS_r6r7ActualResponseState_() {
+  var R = R6R7_ACTUAL_BROWSER_RESPONSE_ || {};
+  var missing = R6R7_ACTUAL_RESPONSE_REQUIRED_.filter(function (k) {
+    var v = R[k];
+    return v === null || v === undefined || v === '';
+  });
+  return {
+    measured_here: false,
+    supplied_by_operator: missing.length === 0,
+    missing_fields: missing,
+    source: 'the audit snippet\'s paste_block, from the browser that pressed Generate',
+    // The shape the pasted block has to show. Stated HERE so a reader of the readback can check the
+    // browser half against something, rather than being told to remember it.
+    required_delta: { mutation_requests: 1, action: 'weeklyAiPlan.generate',
+      route_save_requests: 0, submit_requests: 0, reservation_requests: 0, second_generation_requests: 0 },
+    why_not_measured_here: 'Apps Script cannot see the browser. Recomputing 61_\'s decision and calling the'
+      + ' result "the response" would be describing something nobody received, which is the substitution this'
+      + ' round exists to remove.',
+    values: R
+  };
+}
+
+// ================================================================================================================
+// THE STEPS, AS DATA, IN THE ORDER THEY ARE DONE. Written down so the person doing them and the person
+// reading the result are following the same list, and so a step that was skipped is a missing line rather
+// than a memory.
+//
+// R3-P1 §七 reorders them: the freeze and the baseline check come BEFORE the authorization, because an
+// authorization given while the baseline is still null authorizes a click nothing can check afterwards.
 // ================================================================================================================
 function CENSUS_r6r7ActivationSteps_() {
   return [
-    { n: 1, do: 'Set INVENTORY_AI_PLAN_DB_GENERATION_ENABLED_ to true in 00_config.gs.',
+    { n: 1, phase: 'PREPARE', do: 'Run RUN_R6R7_CONTROLLED_NO_ACTION_ACTIVATION_MANIFEST() and read r6r7_proof.',
+      note: 'It must say READY_TO_AUTHORIZE. Every refusal names itself in stop_reason.' },
+    { n: 2, phase: 'PREPARE', do: 'Copy the freeze_paste_block (emitted in numbered chunks) into'
+        + ' R6R7_NO_ACTION_BEFORE_ in this file.',
+      note: 'It carries the full-row field maps, not only the fingerprints: a fingerprint says a row moved,'
+        + ' the field maps say which column did.' },
+    { n: 3, phase: 'PREPARE', do: 'Re-sync ONLY the census file to Apps Script.',
+      note: 'No production file changes to freeze a baseline.' },
+    { n: 4, phase: 'PREPARE', do: 'Run RUN_R6R7_CONTROLLED_NO_ACTION_READBACK() as a baseline check.',
+      note: 'Expect AWAITING_ACTIVATION with baseline_frozen true. BASELINE_NOT_FROZEN here means step 2'
+        + ' did not take.' },
+    { n: 5, phase: 'AUTHORIZE', do: 'STOP. Obtain an explicit authorization to flip the flag.',
+      note: 'Everything before this point is read-only. Nothing after it is.' },
+    { n: 6, phase: 'ACTIVATE', do: 'Set INVENTORY_AI_PLAN_DB_GENERATION_ENABLED_ to true in 00_config.gs.',
       note: 'ONE constant. The allowlist is not touched and must not be.' },
-    { n: 2, do: 'Sync ONLY 00_config.gs (and 63_api_v1_system_health.gs if its release id moved).',
-      note: 'No other file changes for an activation. A wider sync is a different deployment.' },
-    { n: 3, do: 'Publish a NEW Web App deployment version.',
+    { n: 7, phase: 'ACTIVATE', do: 'Sync ONLY 00_config.gs, publish a NEW Web App deployment version, and hard refresh.',
       note: 'Saving the editor does not change what the Web App answers.' },
-    { n: 4, do: 'Hard refresh the page (Ctrl+F5).' },
-    { n: 5, do: 'Verify: system.health reports the deployment contract OK, mixed_deployment false, and the'
-        + ' EFFECTIVE flag true; and the allowlist still holds exactly the one scope.' },
-    { n: 6, do: 'Run RUN_R6R7_CONTROLLED_AI_PLAN_PREFLIGHT() again and read r6r7_proof.',
+    { n: 8, phase: 'ACTIVATE', do: 'Verify the deployment contract OK, mixed_deployment false, the EFFECTIVE'
+        + ' flag true, and the allowlist still exactly one scope; then run RUN_R6R7_CONTROLLED_AI_PLAN_PREFLIGHT()'
+        + ' again and require READY_NO_ACTION.',
       note: 'The flag is now true, so this is a different state from every earlier preflight.' },
-    { n: 7, do: 'Only if it still says READY_NO_ACTION: run the browser BASELINE snippet, then press'
-        + ' Generate AI Plan ONCE through the normal UI.',
-      note: 'The baseline must be taken BEFORE the click, or the delta cannot be computed.' },
-    { n: 8, do: 'Do NOT press it a second time. A replay is verified by READING, never by pressing.' },
-    { n: 9, do: 'Do NOT press Submit Plan.' },
-    { n: 10, do: 'Run the browser DELTA snippet, then RUN_R6R7_CONTROLLED_NO_ACTION_READBACK() immediately.' },
-    { n: 11, do: 'Set the flag back to false, sync 00_config.gs, and publish a deployment version.' },
-    { n: 12, do: 'Verify the EFFECTIVE flag is false again and the deployment contract is still OK.' }
+    { n: 9, phase: 'PRESS', do: 'Run the browser BASELINE snippet, then the single-use RESPONSE CAPTURE snippet.',
+      note: 'Both before the click. The capture restores itself the moment it has an answer.' },
+    { n: 10, phase: 'PRESS', do: 'Press Generate AI Plan ONCE through the normal UI. Do not press Submit Plan.',
+      note: 'A second press is blocked by the capture and would be an unexplained row if it were not.' },
+    { n: 11, phase: 'READ', do: 'Run the browser AUDIT snippet and copy its paste_block into'
+        + ' R6R7_ACTUAL_BROWSER_RESPONSE_ in this file, then re-sync the census.',
+      note: 'Without it the readback answers AWAITING_BROWSER_AUDIT — a timeline SUCCESS is not a response body.' },
+    { n: 12, phase: 'READ', do: 'Run RUN_R6R7_CONTROLLED_NO_ACTION_READBACK() and require'
+        + ' CONTROLLED_NO_ACTION_CONFIRMED.' },
+    { n: 13, phase: 'RESTORE', do: 'Set the flag back to false, sync 00_config.gs, publish a deployment version.' },
+    { n: 14, phase: 'RESTORE', do: 'Verify the EFFECTIVE flag is false again and the deployment contract is still OK.',
+      note: 'Re-running the manifest IS this check: it STOPs while the flag is true.' }
   ];
 }
 
@@ -6840,9 +7653,21 @@ function CENSUS_r6r7BrowserAudit_() {
       + ' The operator asked the server to consider generating and the server answered that nothing needed'
       + ' writing. Reading the request count as a write count would roll back a correct finish.',
     baseline_snippet: R6R7_BROWSER_BASELINE_SNIPPET_,
+    capture_snippet: R6R7_BROWSER_CAPTURE_SNIPPET_,
     delta_snippet: R6R7_BROWSER_DELTA_SNIPPET_,
+    audit_snippet: R6R7_BROWSER_AUDIT_SNIPPET_,
+    capture_properties: ['wraps exactly one function: KM.DB.generateWeeklyAiPlanDraft',
+      'forwards `this` and `arguments` unchanged, so the payload is the page\'s own',
+      'adds no request and issues none of its own',
+      'captures at most once and restores the original the moment it has an answer',
+      'restores on resolve, on reject, on a synchronous throw and on a timeout',
+      'REJECTS a second call rather than passing it through, and says so in the console',
+      'reads a whitelist of fields out of the envelope, so no token or full payload is carried out'],
     delta_not_total: 'the delta is computed against the baseline seq. A total would count every request the'
-      + ' page had already made this session and report the wrong number for this test.'
+      + ' page had already made this session and report the wrong number for this test.',
+    a_timeline_success_is_not_a_response: 'phase SUCCESS says a request finished. It does not say what the'
+      + ' body contained, so with no capture the audit answers ACTUAL_RESPONSE_NOT_CAPTURED and the readback'
+      + ' will not confirm.'
   };
 }
 
@@ -6856,7 +7681,8 @@ function CENSUS_r6r7ActivationRollback_() {
       why: 'nothing was written. There is no row to expire, no version to restore and no total to correct.',
       still_required: ['set the flag back to false', 'publish a deployment version',
         're-verify the effective flag is false and the deployment contract is still OK'],
-      manual_routes: 'untouched, which the readback proves field by field and by fingerprint.'
+      manual_routes: 'untouched, which the readback proves by full-row fingerprint AND field by field across'
+        + ' every canonical column of both tables.'
     },
     B_any_write_or_unknown_outcome: {
       first_rule: 'do NOT press Generate again. A retry is a guess about what happened, and a guess that'
@@ -6877,8 +7703,20 @@ function CENSUS_r6r7ActivationRollback_() {
 }
 
 // ================================================================================================================
-// R6-R7-R3 — THE READBACK. Zero arguments, read-only, and it refuses to run against a baseline nobody froze.
+// R6-R7-R3 / R3-P1 — THE READBACK. Zero arguments, read-only, and it refuses to run against a baseline nobody
+// froze OR to confirm on a response nobody received.
+//
+// THREE OBJECTS, AND NONE OF THEM STANDS IN FOR ANOTHER:
+//   expected_production_decision   recomputed here from 61_'s builder. measured_here true. It is what the
+//                                  server SHOULD have answered, and it was computed before the click matters.
+//   actual_browser_response        the reply the browser received. measured_here FALSE — pasted in by a
+//                                  person from the capture snippet, UNKNOWN until they do.
+//   database_observed_after        the rows, read here. measured_here true.
+// A confirmation needs all three. Two of them agreeing is the state R3 mistook for a finish.
 // ================================================================================================================
+var R6R7_READBACK_VERDICTS_ = ['BASELINE_NOT_FROZEN', 'AWAITING_ACTIVATION', 'AWAITING_BROWSER_AUDIT',
+  'ACTUAL_RESPONSE_NOT_CAPTURED', 'CONTROLLED_NO_ACTION_CONFIRMED', 'STOP'];
+
 function RUN_R6R7_CONTROLLED_NO_ACTION_READBACK() {
   var out = {
     census: 'RUN_R6R7_CONTROLLED_NO_ACTION_READBACK',
@@ -6889,9 +7727,9 @@ function RUN_R6R7_CONTROLLED_NO_ACTION_READBACK() {
     predicates: [], predicates_passed: 0, predicates_failed: 0,
     baseline_frozen: false, baseline_missing: [],
     routes_observed: [], changed_fields: [], new_rows: [], counts: null,
-    reservation_authority: null,
-    server_response: null,
-    browser_transport: null,
+    schema_now: null, identity_universe_now: null, universe_diff: null,
+    reservation_observation: null, reservation_authority: null,
+    expected_production_decision: null, actual_browser_response: null, database_observed_after: null,
     proof_complete: false, proof_missing: ['NOT_EVALUATED'],
     verdict: 'STOP', stop_reason: ''
   };
@@ -6906,6 +7744,7 @@ function RUN_R6R7_CONTROLLED_NO_ACTION_READBACK() {
   out.baseline_frozen = missing.length === 0;
   P('baseline_was_frozen_before_the_click', [], missing, missing.length === 0);
   if (!out.baseline_frozen) {
+    out.verdict = 'BASELINE_NOT_FROZEN';
     out.stop_reason = 'BASELINE_NOT_FROZEN: ' + missing.join(', ')
       + '. Run RUN_R6R7_CONTROLLED_NO_ACTION_ACTIVATION_MANIFEST() and paste its freeze_paste_block into'
       + ' R6R7_NO_ACTION_BEFORE_ BEFORE pressing Generate. A readback that recomputed its own baseline would'
@@ -6924,23 +7763,72 @@ function RUN_R6R7_CONTROLLED_NO_ACTION_READBACK() {
   out.writer_constructed = prov.writer_constructed === true;
   var rows = prov.visible_route_rows || [];
 
-  // ---- BYTE-IDENTICAL, BY FINGERPRINT AND THEN FIELD BY FIELD. ---------------------------------------------
+  var ssR = null;
+  try { ssR = SpreadsheetApp.openById(prodExpectedDbId_()); } catch (eS) { ssR = null; }
+
+  // ---- THE SCHEMA MUST BE THE ONE THE SNAPSHOTS WERE TAKEN AGAINST. -----------------------------------------
+  // A snapshot compared across an added, dropped or reordered column is comparing two different tables, and
+  // every field equality below would be answering a question nobody asked.
+  var auth = CENSUS_r6r7SchemaAuthority_();
+  out.schema_now = CENSUS_r6r7LiveSchema_(ssR, auth);
+  var nH = out.schema_now.header, nL = out.schema_now.line;
+  P('header_schema_version_did_not_move', B.header_schema_version, nH.schema_version,
+    nH.schema_version === B.header_schema_version);
+  P('header_column_count_did_not_move', B.header_column_count, nH.live_column_count,
+    nH.live_column_count === B.header_column_count);
+  P('header_column_names_did_not_move', B.header_column_names_fingerprint, nH.live_names_fingerprint,
+    nH.live_names_fingerprint === B.header_column_names_fingerprint);
+  P('line_schema_version_did_not_move', B.line_schema_version, nL.schema_version,
+    nL.schema_version === B.line_schema_version);
+  P('line_column_count_did_not_move', B.line_column_count, nL.live_column_count,
+    nL.live_column_count === B.line_column_count);
+  P('line_column_names_did_not_move', B.line_column_names_fingerprint, nL.live_names_fingerprint,
+    nL.live_names_fingerprint === B.line_column_names_fingerprint);
+
+  // ---- BYTE-IDENTICAL, BY FULL-ROW FINGERPRINT AND THEN EVERY CANONICAL COLUMN. ------------------------------
   //
   // The fingerprint is the whole-row claim; the field comparisons say WHICH column moved when it fails. One
   // without the other is either an unexplained mismatch or a list that can miss a column nobody listed.
-  [['A', B.route_a, B.route_a_fingerprint, B.route_a_updated_at, B.route_a_line_updated_at],
-   ['B', B.route_b, B.route_b_fingerprint, B.route_b_updated_at, B.route_b_line_updated_at]].forEach(function (c) {
+  var raw = CENSUS_r6r7RawTables_(ssR);
+  P('both_allocation_tables_were_read', true, raw.readable, raw.readable === true);
+  [['A', B.route_a, B.route_a_fingerprint, B.route_a_updated_at, B.route_a_line_updated_at,
+    B.route_a_header_snapshot, B.route_a_line_snapshot, B.route_a_header_full_fingerprint,
+    B.route_a_line_full_fingerprint, B.route_a_combined_full_fingerprint],
+   ['B', B.route_b, B.route_b_fingerprint, B.route_b_updated_at, B.route_b_line_updated_at,
+    B.route_b_header_snapshot, B.route_b_line_snapshot, B.route_b_header_full_fingerprint,
+    B.route_b_line_full_fingerprint, B.route_b_combined_full_fingerprint]].forEach(function (c) {
     var label = c[0], m = c[1], fpWas = c[2], uaWas = c[3], luaWas = c[4];
+    var hSnapWas = c[5], lSnapWas = c[6], hFpWas = c[7], lFpWas = c[8], cFpWas = c[9];
     var hits = CENSUS_r6r6r4Find_(rows, m.allocation_draft_id, m.allocation_draft_line_id);
     var r = hits.length === 1 ? hits[0] : null;
     var fpNow = CENSUS_r6r7RouteFingerprint_(r);
+    var hh = CENSUS_r6r7RawFind_(raw.headers, 'allocation_draft_id', m.allocation_draft_id);
+    var ll = CENSUS_r6r7RawFind_(raw.lines, 'allocation_draft_line_id', m.allocation_draft_line_id);
+    var f = CENSUS_r6r7RouteFullSnapshot_(auth, out.schema_now,
+      hh.length === 1 ? hh[0] : null, ll.length === 1 ? ll[0] : null);
     out.routes_observed.push({ label: label, allocation_draft_id: m.allocation_draft_id,
+      allocation_draft_line_id: m.allocation_draft_line_id,
       fingerprint_was: fpWas, fingerprint_now: fpNow,
+      header_full_fingerprint_was: hFpWas, header_full_fingerprint_now: f.header_full_fingerprint,
+      line_full_fingerprint_was: lFpWas, line_full_fingerprint_now: f.line_full_fingerprint,
+      combined_full_fingerprint_was: cFpWas, combined_full_fingerprint_now: f.combined_full_fingerprint,
+      canonical_field_count: f.canonical_field_count, covered_field_count: f.covered_field_count,
+      excluded_fields: f.excluded_fields,
       draft_version: r ? CENSUS_str_(r.draft_version) : null,
       updated_at: r ? CENSUS_str_(r.updated_at) : null,
       line_updated_at: r ? CENSUS_str_(r.line_updated_at) : null });
     P('route_' + label + '_present_exactly_once', 1, hits.length, hits.length === 1);
-    P('route_' + label + '_is_byte_identical', fpWas, fpNow, !!fpNow && fpNow === fpWas);
+    P('route_' + label + '_raw_header_row_present_exactly_once', 1, hh.length, hh.length === 1);
+    P('route_' + label + '_raw_line_row_present_exactly_once', 1, ll.length, ll.length === 1);
+    P('route_' + label + '_header_is_byte_identical_across_every_column', hFpWas, f.header_full_fingerprint,
+      !!f.header_full_fingerprint && f.header_full_fingerprint === hFpWas);
+    P('route_' + label + '_line_is_byte_identical_across_every_column', lFpWas, f.line_full_fingerprint,
+      !!f.line_full_fingerprint && f.line_full_fingerprint === lFpWas);
+    P('route_' + label + '_combined_full_fingerprint_did_not_move', cFpWas, f.combined_full_fingerprint,
+      !!f.combined_full_fingerprint && f.combined_full_fingerprint === cFpWas);
+    P('route_' + label + '_still_covers_every_canonical_column', f.canonical_field_count, f.covered_field_count,
+      f.covered_field_count === f.canonical_field_count && f.excluded_fields.length === 0);
+    P('route_' + label + '_route_view_is_byte_identical', fpWas, fpNow, !!fpNow && fpNow === fpWas);
     P('route_' + label + '_version_did_not_move', m.draft_version, r ? CENSUS_str_(r.draft_version) : null,
       !!r && CENSUS_str_(r.draft_version) === m.draft_version);
     P('route_' + label + '_updated_at_did_not_move', uaWas, r ? CENSUS_str_(r.updated_at) : null,
@@ -6950,12 +7838,50 @@ function RUN_R6R7_CONTROLLED_NO_ACTION_READBACK() {
     P('route_' + label + '_was_not_re_owned_by_a_run', 'no generation_run_id, not system_generated',
       r ? (CENSUS_str_(r.generation_type) + ' / ' + (CENSUS_str_(r.generation_run_id) || '(none)')) : null,
       !!r && CENSUS_low_(r.generation_type) !== 'system_generated' && CENSUS_str_(r.generation_run_id) === '');
-    if (r && fpNow !== fpWas) {
-      R6R7_FP_FIELDS_.forEach(function (f) {
-        out.changed_fields.push({ route: label, field: f, now: CENSUS_str_(r[f] === undefined ? '' : r[f]) });
-      });
-    }
+    // EVERY FIELD, ALWAYS — not only when a fingerprint disagrees. A fingerprint that matched for the wrong
+    // reason would silence the field list exactly when it is needed.
+    out.changed_fields = out.changed_fields
+      .concat(CENSUS_r6r7CompareSnapshots_(label, R6R7_SCHEMA_TABLES_.header, hSnapWas, f.header_snapshot))
+      .concat(CENSUS_r6r7CompareSnapshots_(label, R6R7_SCHEMA_TABLES_.line, lSnapWas, f.line_snapshot));
   });
+  P('no_canonical_column_of_either_route_changed', [], out.changed_fields.map(function (c) {
+    return c.route + '.' + c.table + '.' + c.field; }), out.changed_fields.length === 0);
+
+  // ---- THE WHOLE IDENTITY UNIVERSE, NOT ONLY THE TWO ACTIVE ROWS. -------------------------------------------
+  out.identity_universe_now = CENSUS_r6r7IdentityUniverse_(raw, R6R7_SCOPE_);
+  var UB = B.identity_universe || {}, UN = out.identity_universe_now;
+  function setDiff(a, b) { var s = {}; (b || []).forEach(function (x) { s[x] = 1; });
+    return (a || []).filter(function (x) { return !s[x]; }); }
+  out.universe_diff = {
+    new_header_ids: setDiff(UN.header_ids, UB.header_ids),
+    vanished_header_ids: setDiff(UB.header_ids, UN.header_ids),
+    new_line_ids: setDiff(UN.line_ids, UB.line_ids),
+    vanished_line_ids: setDiff(UB.line_ids, UN.line_ids),
+    relation_fingerprint_was: UB.relation_fingerprint || null,
+    relation_fingerprint_now: UN.relation_fingerprint || null,
+    universe_fingerprint_was: UB.universe_fingerprint || null,
+    universe_fingerprint_now: UN.universe_fingerprint || null
+  };
+  P('identity_universe_is_readable', true, UN.available, UN.available === true);
+  P('no_header_id_appeared_at_any_status', [], out.universe_diff.new_header_ids,
+    out.universe_diff.new_header_ids.length === 0);
+  P('no_header_id_vanished', [], out.universe_diff.vanished_header_ids,
+    out.universe_diff.vanished_header_ids.length === 0);
+  P('no_line_id_appeared_at_any_status', [], out.universe_diff.new_line_ids,
+    out.universe_diff.new_line_ids.length === 0);
+  P('no_line_id_vanished', [], out.universe_diff.vanished_line_ids,
+    out.universe_diff.vanished_line_ids.length === 0);
+  P('the_header_to_line_relation_did_not_change', UB.relation_fingerprint, UN.relation_fingerprint,
+    !!UN.relation_fingerprint && UN.relation_fingerprint === UB.relation_fingerprint);
+  // The universe fingerprint covers status, line_status, generation_type, generation_run_id and draft_version
+  // for EVERY row in the scope — so a row created and immediately cancelled, a status flip and a run id
+  // filled in are all caught here even though the two frozen routes are untouched.
+  P('no_status_or_provenance_moved_anywhere_in_the_scope', UB.universe_fingerprint, UN.universe_fingerprint,
+    !!UN.universe_fingerprint && UN.universe_fingerprint === UB.universe_fingerprint);
+  P('active_ai_header_ids_are_still_empty', [], UN.active_ai_header_ids,
+    (UN.active_ai_header_ids || []).length === 0);
+  P('terminal_ai_header_ids_did_not_change', UB.terminal_ai_header_ids || [], UN.terminal_ai_header_ids,
+    JSON.stringify(UN.terminal_ai_header_ids || []) === JSON.stringify(UB.terminal_ai_header_ids || []));
 
   // ---- NOTHING NEW, AND NOTHING MOVED IN THE TOTALS. --------------------------------------------------------
   var manualIds = [B.route_a.allocation_draft_id, B.route_b.allocation_draft_id];
@@ -6981,26 +7907,30 @@ function RUN_R6R7_CONTROLLED_NO_ACTION_READBACK() {
     return CENSUS_str_(x.reason).indexOf('EXPIRED_BY_THIS_RUN') !== -1; });
   P('nothing_was_expired_by_a_run', [], expired, expired.length === 0);
 
-  var ssR = null;
-  try { ssR = SpreadsheetApp.openById(prodExpectedDbId_()); } catch (eS) { ssR = null; }
-  var resv = ssR ? CENSUS_r6r7RowCount_(ssR, 'reservations')
-    : { table: 'reservations', row_count: null, reason: 'DB_NOT_OPENED' };
-  // A COUNT WE COULD NOT READ IS NOT A COUNT OF ZERO, so null === null must not carry this claim. It is
-  // allowed to rest on the SERVER's own guarantee instead — 61_'s activation manifest lists `reservations`
-  // among the tables a generation cannot mutate — but only when the count is genuinely unreadable, and the
-  // observed value says which of the two legs answered.
-  var resvComparable = typeof resv.row_count === 'number' && typeof B.reservation_row_count === 'number';
-  var resvDeclaredZero = false;
-  try {
-    var man = (typeof weeklyAiPlanActivationManifest_ === 'function') ? weeklyAiPlanActivationManifest_() : null;
-    resvDeclaredZero = !!man && (man.tables_guaranteed_zero_mutation || []).indexOf('reservations') !== -1;
-  } catch (eM) { resvDeclaredZero = false; }
-  out.reservation_authority = resvComparable ? 'ROW_COUNT'
-    : (resvDeclaredZero ? 'SERVER_MANIFEST_GUARANTEED_ZERO_MUTATION' : 'NONE');
-  P('no_reservation_appeared',
-    resvComparable ? B.reservation_row_count : 'reservations declared zero-mutation by 61_',
-    resvComparable ? resv.row_count : (out.reservation_authority + ': ' + CENSUS_str_(resv.reason)),
-    resvComparable ? (resv.row_count === B.reservation_row_count) : resvDeclaredZero);
+  // ---- THE RESERVATION OBSERVATION, AS A NAMED STATE. -------------------------------------------------------
+  out.reservation_observation = CENSUS_r6r7ReservationObservation_(ssR, R6R7_SCOPE_);
+  var RB = B.reservation_observation || {}, RN = out.reservation_observation;
+  out.reservation_authority = RN.authority;
+  P('reservation_observation_state_is_named', R6R7_RESERVATION_STATES_, RN.observation_state,
+    R6R7_RESERVATION_STATES_.indexOf(RN.observation_state) !== -1);
+  P('reservation_table_is_not_present_but_unreadable', 'readable, or absent with a server guarantee',
+    RN.observation_state + ' / ' + RN.authority, RN.acceptable === true);
+  P('reservation_observation_state_did_not_change', RB.observation_state, RN.observation_state,
+    RN.observation_state === RB.observation_state);
+  // A COUNT WE COULD NOT READ IS NOT A COUNT OF ZERO, so null === null must not carry this claim. When the
+  // table exists it is compared by scoped ids AND by a fingerprint over every column of every scoped row;
+  // when it genuinely does not exist the claim rests on 61_'s own structural guarantee instead, and the
+  // authority field says which of the two legs answered.
+  if (RN.observation_state === 'SHEET_PRESENT_AND_READABLE') {
+    P('no_reservation_row_appeared_in_the_scope', RB.scoped_count, RN.scoped_count,
+      typeof RN.scoped_count === 'number' && RN.scoped_count === RB.scoped_count);
+    P('every_scoped_reservation_row_is_byte_identical', RB.scoped_fingerprint, RN.scoped_fingerprint,
+      !!RN.scoped_fingerprint && RN.scoped_fingerprint === RB.scoped_fingerprint);
+  } else {
+    P('no_reservation_appeared_by_server_structural_guarantee',
+      'reservations declared zero-mutation by 61_', RN.authority + ': ' + CENSUS_str_(RN.reason),
+      RN.authority === 'SERVER_MANIFEST_GUARANTEED_ZERO_MUTATION');
+  }
 
   out.counts = {
     visible_route_rows: rows.length,
@@ -7009,41 +7939,129 @@ function RUN_R6R7_CONTROLLED_NO_ACTION_READBACK() {
     headers: hdrs.length, lines: lns.length,
     manual_planned_total: total,
     manual_planned_total_before: B.manual_planned_total,
-    reservation_rows: resv.row_count,
-    reservation_rows_before: B.reservation_row_count
+    universe_headers: UN.header_count, universe_headers_before: UB.header_count === undefined ? null : UB.header_count,
+    universe_lines: UN.line_count, universe_lines_before: UB.line_count === undefined ? null : UB.line_count,
+    reservation_rows: RN.row_count,
+    reservation_rows_before: RB.row_count === undefined ? null : RB.row_count,
+    changed_fields: out.changed_fields.length
   };
 
-  // ---- WHAT THE SERVER ANSWERED. Read from the response the operator pastes into the log, or declared
-  //      NOT_SUPPLIED. This census cannot see the browser, and a count it invented would be worse than none.
-  out.server_response = {
-    source: 'the Generate AI Plan response, as shown by the page or by Apps Script > Executions',
-    required_shape: { outcome: 'AI_PLAN_NO_ACTION', code: 'NO_REPLENISHMENT_REQUIRED',
-      recommended_qty: 0, qualifying_planned_qty: R6R7_SET_BEFORE_.current_plan_total, residual_qty: 0,
-      created_headers: 0, created_lines: 0, updated_headers: 0, updated_lines: 0,
-      cancelled_headers: 0, cancelled_lines: 0, db_writes: 0, writer_reached: false,
-      routes: [], groups: [] },
-    note: 'every one of these is asserted against the DATABASE above as well. The response is what the server'
-      + ' says it did; the rows are what it actually did, and they must agree.'
+  // ---- THE THREE OBJECTS, KEPT APART. -----------------------------------------------------------------------
+  var expShape = { outcome: 'AI_PLAN_NO_ACTION', code: 'NO_REPLENISHMENT_REQUIRED',
+    recommended_qty: 0, qualifying_planned_qty: R6R7_SET_BEFORE_.current_plan_total, residual_qty: 0,
+    created_headers: 0, created_lines: 0, updated_headers: 0, updated_lines: 0,
+    cancelled_headers: 0, cancelled_lines: 0, db_writes: 0, writer_reached: false,
+    routes: [], groups: [] };
+  var pp = CENSUS_r6r7ProductionPath_() || {};
+  out.expected_production_decision = {
+    measured_here: true,
+    is_the_actual_response: false,
+    source: 'weeklyAiPlanControlledDecision_ (61_) — the same builder the public handler reads',
+    outcome: pp.outcome || null, code: pp.code || null, reason: pp.reason || null,
+    recommended_qty: pp.recommended_qty === undefined ? null : pp.recommended_qty,
+    qualifying_planned_qty: pp.qualifying_active_planned_qty === undefined
+      ? null : pp.qualifying_active_planned_qty,
+    residual_qty: pp.residual_qty === undefined ? null : pp.residual_qty,
+    would_write: pp.would_write === true, writer_reached: pp.writer_reached === true,
+    required_shape: expShape,
+    note: 'this is what the server SHOULD answer, recomputed here. It is NOT the reply the browser received,'
+      + ' and it is never allowed to stand in for one.'
   };
-  out.browser_transport = {
-    measured_here: false,
-    why: 'Apps Script cannot see the browser transport timeline. The request count is measured in the browser'
-      + ' by the delta snippet and reported separately; fabricating it here would be the one thing this'
-      + ' contract exists to prevent.',
-    required_delta: { mutation_requests: 1, action: 'weeklyAiPlan.generate',
-      route_save_requests: 0, submit_requests: 0, reservation_requests: 0, second_generation_requests: 0 }
+  out.actual_browser_response = CENSUS_r6r7ActualResponseState_();
+  out.database_observed_after = {
+    measured_here: true,
+    source: 'shipping_allocation_drafts + shipping_allocation_draft_lines, read in this execution',
+    new_rows: out.new_rows.length, changed_fields: out.changed_fields.length,
+    manual_planned_total: total,
+    universe_header_count: UN.header_count, universe_line_count: UN.line_count,
+    reservation_observation_state: RN.observation_state,
+    note: 'the response is what the server says it did; the rows are what it actually did. Both are required'
+      + ' and they must agree.'
   };
+
+  var A = out.actual_browser_response.values || {};
+  // A pasted audit that captured nothing has nothing to compare. Running the comparisons anyway would
+  // answer 'eleven predicates failed' where the true answer is 'there is no response to read'.
+  var noBody = A.captured === false;
+  if (out.actual_browser_response.supplied_by_operator && !noBody) {
+    P('exactly_one_generation_request_was_made', true, A.exactly_one_generation_request,
+      A.exactly_one_generation_request === true);
+    P('the_transport_recorded_one_mutation_request', 1, A.new_mutation_requests, A.new_mutation_requests === 1);
+    P('no_route_save_or_submit_or_reservation_request_rode_along', [0, 0, 0],
+      [A.route_save_requests, A.submit_requests, A.reservation_requests],
+      A.route_save_requests === 0 && A.submit_requests === 0 && A.reservation_requests === 0);
+    P('the_actual_response_was_captured', true, A.captured, A.captured === true);
+    P('the_capture_restored_the_original_function', true, A.capture_restored, A.capture_restored === true);
+    P('no_second_generation_call_was_made', 1, A.capture_calls,
+      A.capture_calls === null || A.capture_calls === undefined || A.capture_calls === 1);
+    P('the_actual_response_outcome_is_no_action', expShape.outcome, A.response_outcome,
+      A.response_outcome === expShape.outcome);
+    P('the_actual_response_code_is_no_replenishment_required', expShape.code, A.response_code,
+      A.response_code === expShape.code);
+    P('the_actual_response_quantities_match_the_frozen_baseline',
+      [expShape.recommended_qty, expShape.qualifying_planned_qty, expShape.residual_qty],
+      [A.recommended_qty, A.qualifying_planned_qty, A.residual_qty],
+      A.recommended_qty === expShape.recommended_qty
+        && A.qualifying_planned_qty === expShape.qualifying_planned_qty
+        && A.residual_qty === expShape.residual_qty);
+    P('every_mutation_counter_in_the_actual_response_is_zero',
+      [0, 0, 0, 0, 0, 0, 0],
+      [A.created_headers, A.created_lines, A.updated_headers, A.updated_lines,
+        A.cancelled_headers, A.cancelled_lines, A.db_writes],
+      A.created_headers === 0 && A.created_lines === 0 && A.updated_headers === 0 && A.updated_lines === 0
+        && A.cancelled_headers === 0 && A.cancelled_lines === 0 && A.db_writes === 0);
+    P('the_actual_response_says_the_writer_was_not_reached', false, A.writer_reached,
+      A.writer_reached === false);
+    P('the_actual_response_carries_no_route_and_no_group', [0, 0], [A.routes_count, A.groups_count],
+      A.routes_count === 0 && A.groups_count === 0);
+    // THE TWO HALVES MUST AGREE. The response saying zero while the rows say otherwise, or the reverse, is
+    // the disagreement that matters most — and it is only detectable because both were read.
+    P('the_actual_response_and_the_database_agree',
+      'response db_writes 0 and 0 new rows and 0 changed fields',
+      [A.db_writes, out.new_rows.length, out.changed_fields.length],
+      A.db_writes === 0 && out.new_rows.length === 0 && out.changed_fields.length === 0);
+    P('the_expected_decision_and_the_actual_response_agree',
+      [out.expected_production_decision.outcome, out.expected_production_decision.code],
+      [A.response_outcome, A.response_code],
+      A.response_outcome === out.expected_production_decision.outcome
+        && A.response_code === out.expected_production_decision.code);
+  }
 
   P('writer_not_constructed', false, out.writer_constructed, out.writer_constructed === false);
   P('db_writes_is_zero', 0, out.db_writes, out.db_writes === 0);
 
-  if (out.predicates_failed === 0) {
-    out.verdict = 'CONTROLLED_NO_ACTION_CONFIRMED';
-  } else {
+  // ---- THE VERDICT. Four honest ways to not be finished, and one way to be. ---------------------------------
+  var flagVal = null;
+  try { flagVal = (typeof inventoryAiPlanDbGenerationEnabled_ === 'function')
+    ? inventoryAiPlanDbGenerationEnabled_() : null; } catch (eF) { flagVal = null; }
+  if (out.predicates_failed > 0) {
     out.verdict = 'STOP';
     out.stop_reason = out.predicates_failed + ' predicate(s) failed: '
       + out.predicates.filter(function (p) { return !p.pass; }).map(function (p) { return p.predicate; }).join(', ')
       + '. Do NOT press Generate again. Freeze what is there and produce a repair manifest.';
+  } else if (noBody) {
+    // The operator DID run the audit, and the audit says there is no body to read. That is a different
+    // state from nobody having pasted anything, and it gets its own name.
+    out.verdict = 'ACTUAL_RESPONSE_NOT_CAPTURED';
+    out.stop_reason = 'ACTUAL_RESPONSE_NOT_CAPTURED: the browser audit was pasted and it reports no'
+      + ' captured response body. A timeline phase of SUCCESS says a request finished, not what it'
+      + ' answered, so this cannot be confirmed. The database above is unchanged, which is good news and'
+      + ' not a confirmation. Treat it as case B: do not press Generate again.';
+  } else if (!out.actual_browser_response.supplied_by_operator) {
+    if (flagVal === false) {
+      out.verdict = 'AWAITING_ACTIVATION';
+      out.stop_reason = 'AWAITING_ACTIVATION: the baseline is frozen and the database matches it exactly.'
+        + ' The flag is still false, so the click has not happened yet. This is the expected answer to the'
+        + ' step-4 baseline check.';
+    } else {
+      out.verdict = 'AWAITING_BROWSER_AUDIT';
+      out.stop_reason = 'AWAITING_BROWSER_AUDIT: the database matches the frozen baseline exactly, and'
+        + ' nobody has pasted the browser audit yet — missing ' + out.actual_browser_response.missing_fields.join(', ')
+        + '. Apps Script cannot see the browser, so this half is UNKNOWN rather than absent, and UNKNOWN is'
+        + ' not CONFIRMED.';
+    }
+  } else {
+    out.verdict = 'CONTROLLED_NO_ACTION_CONFIRMED';
   }
   return CENSUS_r6r7Finish_(out);
 }
@@ -7151,14 +8169,22 @@ function CENSUS_r6r7ProofObject_(out) {
   };
 }
 
-/** R6-R7-R3 — the activation manifest's bounded proof. Scalars and two short id lists; no steps, no
- *  snippets, no rollback prose, no predicate array. All of those are unbounded and all of them are in the
- *  detailed export, which is where a reader goes for them. */
+/** R6-R7-R3 — the activation manifest's bounded proof. Scalars, fingerprints and two short id lists; no
+ *  steps, no snippets, no rollback prose, no predicate array, and — since R3-P1 — no field maps. All of
+ *  those are unbounded and all of them are in the detailed export, which is where a reader goes for them. */
 function CENSUS_r6r7ActivationProofObject_(out) {
   var b = out.frozen_before || {};
   var pp = out.production_path || {};
   var dep = out.deployment || {};
   var pa = out.parity || {};
+  var sa = out.schema_authority || {};
+  var ls = out.live_schema || {};
+  var lsH = ls.header || {}, lsL = ls.line || {};
+  var uni = out.identity_universe || {};
+  var rz = out.reservation_observation || {};
+  var exc = 0;
+  ['route_a_header_snapshot', 'route_a_line_snapshot', 'route_b_header_snapshot', 'route_b_line_snapshot']
+    .forEach(function (k) { var sn = b[k]; if (sn && sn.excluded_fields) exc += sn.excluded_fields.length; });
   return {
     census: out.census, build: out.build, verdict: out.verdict,
     predicates_passed: out.predicates_passed, predicates_failed: out.predicates_failed,
@@ -7180,6 +8206,48 @@ function CENSUS_r6r7ActivationProofObject_(out) {
     production_path: { outcome: pp.outcome || null, code: pp.code || null, reason: pp.reason || null,
       would_write: pp.would_write === true, writer_reached: pp.writer_reached === true },
     parity_agree: pa.agree === undefined ? null : pa.agree,
+    // R3-P1 — the schema the snapshots were taken against. A fingerprint means nothing without it.
+    schema: {
+      header_version: b.header_schema_version || null,
+      header_columns: b.header_column_count === undefined ? null : b.header_column_count,
+      header_canonical_columns: sa.header ? sa.header.column_count : null,
+      header_names_fingerprint: b.header_column_names_fingerprint || null,
+      header_matches_authority: !!lsH.live_names_fingerprint && !!sa.header
+        && lsH.live_names_fingerprint === sa.header.names_fingerprint,
+      line_version: b.line_schema_version || null,
+      line_columns: b.line_column_count === undefined ? null : b.line_column_count,
+      line_canonical_columns: sa.line ? sa.line.column_count : null,
+      line_names_fingerprint: b.line_column_names_fingerprint || null,
+      line_matches_authority: !!lsL.live_names_fingerprint && !!sa.line
+        && lsL.live_names_fingerprint === sa.line.names_fingerprint
+    },
+    // R3-P1 — three fingerprints per route, over every canonical column of both tables.
+    routes: {
+      a_header: b.route_a_header_full_fingerprint || null,
+      a_line: b.route_a_line_full_fingerprint || null,
+      a_combined: b.route_a_combined_full_fingerprint || null,
+      b_header: b.route_b_header_full_fingerprint || null,
+      b_line: b.route_b_line_full_fingerprint || null,
+      b_combined: b.route_b_combined_full_fingerprint || null,
+      a_route_view: b.route_a_fingerprint || null,
+      b_route_view: b.route_b_fingerprint || null,
+      canonical_field_count: (b.route_a_header_snapshot && b.route_a_line_snapshot)
+        ? (b.route_a_header_snapshot.canonical_field_count + b.route_a_line_snapshot.canonical_field_count)
+        : null,
+      excluded_field_count: exc
+    },
+    identity_universe: {
+      available: uni.available === true,
+      headers: uni.header_count === undefined ? null : uni.header_count,
+      lines: uni.line_count === undefined ? null : uni.line_count,
+      active_ai_headers: (uni.active_ai_header_ids || []).length,
+      terminal_ai_headers: (uni.terminal_ai_header_ids || []).length,
+      relation_fingerprint: uni.relation_fingerprint || null,
+      universe_fingerprint: uni.universe_fingerprint || null
+    },
+    reservation: { observation_state: rz.observation_state || null, authority: rz.authority || null,
+      acceptable: rz.acceptable === true, scoped_count: rz.scoped_count === undefined ? null : rz.scoped_count },
+    normalizers_available: !!out.normalizers && out.normalizers.available === true,
     frozen_before: {
       frozen_at: b.frozen_at || null,
       calculation_run_id: b.calculation_run_id || null,
@@ -7191,20 +8259,39 @@ function CENSUS_r6r7ActivationProofObject_(out) {
         ? null : b.qualifying_active_planned_qty,
       residual_qty: b.residual_qty === undefined ? null : b.residual_qty,
       manual_planned_total: b.manual_planned_total === undefined ? null : b.manual_planned_total,
-      route_a_fingerprint: b.route_a_fingerprint || null,
-      route_b_fingerprint: b.route_b_fingerprint || null,
-      active_ai_headers: b.active_ai_headers === undefined ? null : b.active_ai_headers,
-      reservation_row_count: b.reservation_row_count === undefined ? null : b.reservation_row_count
+      active_ai_headers: b.active_ai_headers === undefined ? null : b.active_ai_headers
     },
     stop_reason: out.stop_reason || ''
   };
 }
 
-/** R6-R7-R3 — the readback's bounded proof. The two fingerprints before and after are the whole claim. */
+/** R6-R7-R3 / R3-P1 — the readback's bounded proof. The three full fingerprints per route before and after
+ *  are the byte-identical claim; the universe fingerprint covers every other row the scope can reach; and
+ *  the expected/actual pair is what stops a recomputed decision passing as a received response. */
 function CENSUS_r6r7NoActionReadbackProofObject_(out) {
   var c = out.counts || {};
   var a = (out.routes_observed || [])[0] || {};
   var bb = (out.routes_observed || [])[1] || {};
+  var ud = out.universe_diff || {};
+  var un = out.identity_universe_now || {};
+  var rz = out.reservation_observation || {};
+  var ex = out.expected_production_decision || {};
+  var ab = out.actual_browser_response || {};
+  var av = ab.values || {};
+  var sn = out.schema_now || {};
+  var snH = sn.header || {}, snL = sn.line || {};
+  function route(r) {
+    return { id: r.allocation_draft_id || null,
+      header_was: r.header_full_fingerprint_was || null, header_now: r.header_full_fingerprint_now || null,
+      line_was: r.line_full_fingerprint_was || null, line_now: r.line_full_fingerprint_now || null,
+      combined_was: r.combined_full_fingerprint_was || null,
+      combined_now: r.combined_full_fingerprint_now || null,
+      identical: !!r.combined_full_fingerprint_now
+        && r.combined_full_fingerprint_now === r.combined_full_fingerprint_was,
+      fields_compared: r.covered_field_count === undefined ? null : r.covered_field_count,
+      excluded_fields: (r.excluded_fields || []).length,
+      draft_version: r.draft_version || null };
+  }
   return {
     census: out.census, build: out.build, verdict: out.verdict,
     predicates_passed: out.predicates_passed, predicates_failed: out.predicates_failed,
@@ -7218,26 +8305,54 @@ function CENSUS_r6r7NoActionReadbackProofObject_(out) {
     route_save_calls: CENSUS_num_(out.route_save_calls) || 0,
     reservation_writes: CENSUS_num_(out.reservation_writes) || 0,
     scope: out.scope || null,
-    route_a: { id: a.allocation_draft_id || null, fingerprint_was: a.fingerprint_was || null,
-      fingerprint_now: a.fingerprint_now || null, identical: !!a.fingerprint_now && a.fingerprint_now === a.fingerprint_was,
-      draft_version: a.draft_version || null },
-    route_b: { id: bb.allocation_draft_id || null, fingerprint_was: bb.fingerprint_was || null,
-      fingerprint_now: bb.fingerprint_now || null, identical: !!bb.fingerprint_now && bb.fingerprint_now === bb.fingerprint_was,
-      draft_version: bb.draft_version || null },
+    schema: { header_version: snH.schema_version || null, header_columns: snH.live_column_count === undefined ? null : snH.live_column_count,
+      header_names_fingerprint: snH.live_names_fingerprint || null,
+      line_version: snL.schema_version || null, line_columns: snL.live_column_count === undefined ? null : snL.live_column_count,
+      line_names_fingerprint: snL.live_names_fingerprint || null },
+    route_a: route(a), route_b: route(bb),
     new_rows: (out.new_rows || []).length,
     new_row_ids: (out.new_rows || []).map(function (r) { return CENSUS_str_(r.allocation_draft_id); }),
     changed_field_count: (out.changed_fields || []).length,
-    manual_planned_total: c.manual_planned_total === undefined ? null : c.manual_planned_total,
-    manual_planned_total_before: c.manual_planned_total_before === undefined ? null : c.manual_planned_total_before,
-    reservation_rows: c.reservation_rows === undefined ? null : c.reservation_rows,
-    reservation_rows_before: c.reservation_rows_before === undefined ? null : c.reservation_rows_before,
+    // The first few names only. A full diff is unbounded, and the export carries it.
+    changed_field_names: (out.changed_fields || []).slice(0, 6).map(function (f) {
+      return f.route + '.' + f.table + '.' + f.field; }),
+    identity_universe: {
+      headers: un.header_count === undefined ? null : un.header_count,
+      lines: un.line_count === undefined ? null : un.line_count,
+      new_headers: (ud.new_header_ids || []).length, vanished_headers: (ud.vanished_header_ids || []).length,
+      new_lines: (ud.new_line_ids || []).length, vanished_lines: (ud.vanished_line_ids || []).length,
+      relation_unchanged: !!ud.relation_fingerprint_now
+        && ud.relation_fingerprint_now === ud.relation_fingerprint_was,
+      universe_unchanged: !!ud.universe_fingerprint_now
+        && ud.universe_fingerprint_now === ud.universe_fingerprint_was,
+      active_ai_headers: (un.active_ai_header_ids || []).length
+    },
+    reservation: { observation_state: rz.observation_state || null, authority: rz.authority || null,
+      acceptable: rz.acceptable === true, scoped_count: rz.scoped_count === undefined ? null : rz.scoped_count },
+    // THE THREE OBJECTS, IN THE ONE LINE THAT SURVIVES.
+    expected_production_decision: { measured_here: true, is_the_actual_response: false,
+      outcome: ex.outcome || null, code: ex.code || null, would_write: ex.would_write === true },
+    actual_browser_response: { measured_here: false,
+      supplied_by_operator: ab.supplied_by_operator === true,
+      missing_field_count: (ab.missing_fields || []).length,
+      captured: av.captured === undefined ? null : av.captured,
+      outcome: av.response_outcome === undefined ? null : av.response_outcome,
+      code: av.response_code === undefined ? null : av.response_code,
+      db_writes: av.db_writes === undefined ? null : av.db_writes,
+      generation_requests: av.generation_requests === undefined ? null : av.generation_requests,
+      new_mutation_requests: av.new_mutation_requests === undefined ? null : av.new_mutation_requests,
+      capture_restored: av.capture_restored === undefined ? null : av.capture_restored },
+    database_observed_after: { measured_here: true,
+      manual_planned_total: c.manual_planned_total === undefined ? null : c.manual_planned_total,
+      manual_planned_total_before: c.manual_planned_total_before === undefined
+        ? null : c.manual_planned_total_before },
     browser_transport_measured_here: false,
     stop_reason: out.stop_reason || ''
   };
 }
 
-/** R6-R7-R3 — the guards for the two new proofs. Same principle: a proof that cannot show the thing its
- *  verdict rests on says so, in the line that survives. */
+/** R6-R7-R3 / R3-P1 — the guards for the two new proofs. Same principle: a proof that cannot show the thing
+ *  its verdict rests on says so, in the line that survives. */
 function CENSUS_r6r7ActivationProofGuard_(out) {
   var b = out.frozen_before || {};
   var pp = out.production_path || {};
@@ -7246,13 +8361,39 @@ function CENSUS_r6r7ActivationProofGuard_(out) {
   else {
     if (!b.route_a_fingerprint || !b.route_b_fingerprint) missing.push('frozen_before.route_fingerprints');
     if (!b.calculation_run_id) missing.push('frozen_before.calculation_run_id');
+    // R3-P1 — the byte-identical claim rests on the FULL rows and on the schema they were read against.
+    if (!b.route_a_header_full_fingerprint || !b.route_a_line_full_fingerprint
+      || !b.route_b_header_full_fingerprint || !b.route_b_line_full_fingerprint
+      || !b.route_a_combined_full_fingerprint || !b.route_b_combined_full_fingerprint) {
+      missing.push('frozen_before.full_row_fingerprints');
+    }
+    if (!b.header_schema_version || !b.line_schema_version || !b.header_column_names_fingerprint
+      || !b.line_column_names_fingerprint) missing.push('frozen_before.schema');
+    if (!b.identity_universe || b.identity_universe.available !== true) {
+      missing.push('frozen_before.identity_universe');
+    }
+    if (!b.reservation_observation) missing.push('frozen_before.reservation_observation');
   }
   if (!out.production_path || !pp.outcome) missing.push('production_path.outcome');
   if (!out.deployment || out.deployment.available !== true) missing.push('deployment');
-  // A manifest may never say READY while the flag is already on, or while production would write.
+  // A manifest may never say READY while the flag is already on, while production would write, or while the
+  // freeze it is handing over covers less than every canonical column. That last one is its own lock: a
+  // narrower claim reported under the word 'byte-identical' is the defect R3-P1 exists to close.
   if (out.verdict === 'READY_TO_AUTHORIZE') {
     if (out.flag && out.flag.value === true) missing.push('flag_already_true_cannot_be_ready_to_authorize');
     if (pp.would_write === true) missing.push('would_write_contradicts_READY_TO_AUTHORIZE');
+    var exc = 0;
+    ['route_a_header_snapshot', 'route_a_line_snapshot', 'route_b_header_snapshot', 'route_b_line_snapshot']
+      .forEach(function (k) {
+        var sn = b[k];
+        if (!sn) { exc += 1; return; }
+        exc += (sn.excluded_fields || []).length;
+        if (sn.covered_field_count !== sn.canonical_field_count) exc += 1;
+      });
+    if (exc > 0) missing.push('excluded_fields_contradict_the_byte_identical_claim');
+    if (!out.normalizers || out.normalizers.available !== true) {
+      missing.push('normalizer_authority_unavailable_cannot_be_ready_to_authorize');
+    }
   }
   out.proof_complete = missing.length === 0;
   out.proof_missing = missing;
@@ -7265,20 +8406,55 @@ function CENSUS_r6r7ActivationProofGuard_(out) {
 }
 
 function CENSUS_r6r7NoActionReadbackProofGuard_(out) {
+  // A readback that refused BEFORE reading has nothing to export, and demanding the evidence it refused for
+  // lack of would replace a precise refusal with a vague one.
+  if (out.verdict === 'BASELINE_NOT_FROZEN') {
+    out.proof_complete = true;
+    out.proof_missing = [];
+    return true;
+  }
   var missing = [];
   if (out.baseline_frozen !== true) missing.push('baseline_frozen');
   if (!out.counts) missing.push('counts');
   if (!out.routes_observed || out.routes_observed.length !== 2) missing.push('routes_observed');
+  if (!out.schema_now) missing.push('schema_now');
+  if (!out.identity_universe_now) missing.push('identity_universe_now');
+  if (!out.reservation_observation) missing.push('reservation_observation');
+  if (!out.expected_production_decision) missing.push('expected_production_decision');
+  if (!out.actual_browser_response) missing.push('actual_browser_response');
+  if (!out.database_observed_after) missing.push('database_observed_after');
   if (out.verdict === 'CONTROLLED_NO_ACTION_CONFIRMED') {
     if ((out.new_rows || []).length !== 0) missing.push('new_rows_contradict_NO_ACTION_CONFIRMED');
+    if ((out.changed_fields || []).length !== 0) missing.push('changed_fields_contradict_NO_ACTION_CONFIRMED');
     var bad = (out.routes_observed || []).filter(function (r) {
-      return !r.fingerprint_now || r.fingerprint_now !== r.fingerprint_was; });
-    if (bad.length) missing.push('route_fingerprint_moved_contradicts_NO_ACTION_CONFIRMED');
+      return !r.combined_full_fingerprint_now
+        || r.combined_full_fingerprint_now !== r.combined_full_fingerprint_was; });
+    if (bad.length) missing.push('full_row_fingerprint_moved_contradicts_NO_ACTION_CONFIRMED');
+    var ud = out.universe_diff || {};
+    if ((ud.new_header_ids || []).length || (ud.new_line_ids || []).length
+      || (ud.vanished_header_ids || []).length || (ud.vanished_line_ids || []).length
+      || !ud.universe_fingerprint_now || ud.universe_fingerprint_now !== ud.universe_fingerprint_was) {
+      missing.push('identity_universe_moved_contradicts_NO_ACTION_CONFIRMED');
+    }
+    if ((out.reservation_observation || {}).acceptable !== true) {
+      missing.push('reservation_observation_unusable_cannot_be_NO_ACTION_CONFIRMED');
+    }
+    // AND THE HALF THIS ROUND ADDED. A confirmation on two objects out of three is the substitution the
+    // whole patch exists to remove: an expectation is not a received reply.
+    var ab = out.actual_browser_response || {};
+    if (ab.supplied_by_operator !== true) {
+      missing.push('actual_browser_response_missing_cannot_be_NO_ACTION_CONFIRMED');
+    } else if ((ab.values || {}).captured !== true) {
+      missing.push('actual_response_not_captured_cannot_be_NO_ACTION_CONFIRMED');
+    }
   }
   out.proof_complete = missing.length === 0;
   out.proof_missing = missing;
-  if (!out.proof_complete) {
+  if (!out.proof_complete && out.verdict !== 'STOP') {
     out.verdict = 'STOP';
+    out.stop_reason = (out.stop_reason ? out.stop_reason + ' ' : '')
+      + 'PROOF_INCOMPLETE: ' + missing.join(', ') + '.';
+  } else if (!out.proof_complete) {
     out.stop_reason = (out.stop_reason ? out.stop_reason + ' ' : '')
       + 'PROOF_INCOMPLETE: ' + missing.join(', ') + '.';
   }
@@ -7316,6 +8492,11 @@ function CENSUS_r6r7ProofGuard_(out) {
   return out.proof_complete;
 }
 
+// The verdicts that are already a refusal. A guard may not rename one of these: each was chosen because it
+// tells the operator something a generic STOP cannot, and BASELINE_NOT_FROZEN in particular is the message
+// that names the exact fields to paste.
+var R6R7_REFUSAL_VERDICTS_ = { STOP: 1, BASELINE_NOT_FROZEN: 1, ACTUAL_RESPONSE_NOT_CAPTURED: 1 };
+
 // The shared exit. Asserts the read-only facts on the way out and prints ONE complete line to the log, because
 // the Apps Script editor shows the execution log and not the returned object.
 function CENSUS_r6r7Finish_(out) {
@@ -7334,7 +8515,11 @@ function CENSUS_r6r7Finish_(out) {
   out.export_complete = absent.length === 0;
   if (!out.export_complete) {
     out.export_missing = absent;
-    out.verdict = 'STOP';
+    // R3-P1 — A REFUSAL KEEPS ITS OWN NAME. BASELINE_NOT_FROZEN returns before it reads anything, so it
+    // has no evidence to export by construction; overwriting it with a generic STOP would replace the one
+    // message that tells the operator exactly what to do with one that tells them nothing. The gate still
+    // reports export_complete false and names what is absent — it just does not rename the refusal.
+    if (!R6R7_REFUSAL_VERDICTS_[out.verdict]) out.verdict = 'STOP';
     out.stop_reason = (out.stop_reason ? out.stop_reason + ' ' : '')
       + 'EXPORT_INCOMPLETE: ' + absent.join(', ') + ' — this census\'s verdict rests on evidence it did not'
       + ' report, and a verdict a reader cannot check is not one.';
@@ -7369,6 +8554,18 @@ function CENSUS_r6r7Finish_(out) {
         within_bounds: proofLine.length <= R6R7_PROOF_MAX_BYTES_,
         detailed_export_follows: true }));
     }
+  }
+
+  // ---- THE FREEZE BLOCK, IN NUMBERED CHUNKS, BEFORE THE DETAILED EXPORT.
+  // It carries the full-row field maps, so it is far too long for one Logger line — and it is the one thing
+  // the operator has to copy out of this run. Numbered chunks make a truncated paste visible: chunk 3 of 4
+  // missing is a gap somebody can see, where a single cut line is not.
+  if (out.freeze_paste_block) {
+    var chunks = CENSUS_r6r7EmitChunked_('r6r7_freeze_paste_block', out.freeze_paste_block,
+      R6R7_CHUNK_MAX_BYTES_);
+    CENSUS_log_('r6r7_freeze_paste_meta', JSON.stringify({ chunks: chunks,
+      bytes: out.freeze_paste_block.length, chunk_max_bytes: R6R7_CHUNK_MAX_BYTES_,
+      paste_into: 'R6R7_NO_ACTION_BEFORE_' }));
   }
 
   var payload = {
