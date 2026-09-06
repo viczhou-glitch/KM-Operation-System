@@ -148,7 +148,7 @@ section('A — the real call graph: which function printed which verdict');
 ok(/function RUN_R6R7_CONTROLLED_AI_PLAN_PREFLIGHT\(\)/.test(CENSUS),
   'A1  the preflight is the entry point the operator runs');
 ok(at(CENSUS, 'function RUN_R6R7_CONTROLLED_AI_PLAN_PREFLIGHT()')
-  < at(CENSUS, 'try { e3 = RUN_E3_CENSUS_RESUS_US_AMAZON_CO1100R(); }'),
+  < at(CENSUS, "CENSUS_quiet_('RUN_E3_CENSUS_RESUS_US_AMAZON_CO1100R',"),
   'A2  and inside it, it calls RUN_E3_CENSUS_RESUS_US_AMAZON_CO1100R for the proposed routes');
 // extractFn counts braces and this function's comments hold them, so the containment claim is made
 // positionally: the call sits after this function opens and before the next one does.
@@ -490,8 +490,10 @@ mut('G4 the export guard removed, so a verdict stands on evidence it never repor
   var m = swap(drop, '  var absent = required.filter(function (k) { return out[k] === null || out[k] === undefined; });',
     '  var absent = [];');
   var r = runCensus(m).res;
-  return clean.verdict === 'STOP' && clean.export_complete === false
-    && r.verdict === 'READY_NO_ACTION' && r.export_complete === true;
+  // The verdict is now held by TWO locks — P1 added a proof guard that also refuses a missing
+  // production_path — so this mutant is aimed at the property the EXPORT guard owns by itself.
+  return clean.export_complete === false && clean.stop_reason.indexOf('EXPORT_INCOMPLETE') >= 0
+    && r.export_complete === true && r.stop_reason.indexOf('EXPORT_INCOMPLETE') < 0;
 });
 
 mut('G5 a valid zero falling through into the REQUESTED_SCOPE_EMPTY refusal', function () {
@@ -531,10 +533,15 @@ mut('G8 the census mapping the outcome itself again', function () {
 
 mut('G9 the projection allowed to claim production authority', function () {
   var clean = preflight(live(), { is_production_generation_authority: true }).res;
+  // Two locks again: the preflight predicate, and P1's proof guard. Either alone still STOPS, so the
+  // mutant removes both — which is what "the projection is allowed to speak for production" would mean.
   var m = swap(CENSUS, "    out.legacy_projection.is_production_generation_authority === false);",
     '    true);');
+  m = swap(m, "  if (!out.legacy_projection || lp.is_production_generation_authority !== false) {", 
+    "  if (false) {");
   var r = runCensus(m, live(), { is_production_generation_authority: true }).res;
-  return clean.verdict === 'STOP' && r.verdict === 'READY_NO_ACTION';
+  return clean.verdict === 'STOP' && clean.proof_missing.length > 0
+    && r.verdict === 'READY_NO_ACTION' && r.proof_complete === true;
 });
 
 mut('G10 the gate order rewritten so the refusal precedes the short circuit', function () {

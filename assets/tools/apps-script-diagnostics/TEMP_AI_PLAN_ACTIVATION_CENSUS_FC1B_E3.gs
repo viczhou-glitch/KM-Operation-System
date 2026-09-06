@@ -250,11 +250,42 @@ function CENSUS_str_(v) { return String(v == null ? '' : v).trim(); }
 function CENSUS_num_(v) { var n = Number(v); return isFinite(n) ? n : 0; }
 function CENSUS_low_(v) { return CENSUS_str_(v).toLowerCase(); }
 
+// ================================================================================================================
+// R6-R7-R2-P1 — 'Logging output too large. Truncating output.'
+//
+// The controlled preflight passed every check and the operator could not KEEP the proof: the execution log
+// was cut in the middle of the parity object, so the three facts an acceptance rests on — the parity, the
+// legacy authority label and the export completeness — were the ones that fell off the end.
+//
+// Apps Script truncates the TAIL of the log, so two things fix it and both are needed. The compact proof is
+// emitted BEFORE the detailed export (below), and the nested diagnostics the preflight calls on its way
+// through no longer print their own full logs into this one. That second part is a suppression, so it is
+// ANNOUNCED and COUNTED, and each nested census remains runnable on its own for the log it was suppressed
+// out of. Silence about missing evidence is the failure being fixed, not an acceptable way to fix it.
+// ================================================================================================================
+var CENSUS_LOG_MUTED_ = false;
+var CENSUS_LOG_SUPPRESSED_ = 0;
+
 function CENSUS_log_(label, value) {
+  if (CENSUS_LOG_MUTED_) { CENSUS_LOG_SUPPRESSED_++; return; }
   try {
     Logger.log('[E3-CENSUS] ' + label + ': ' +
       (value && typeof value === 'object' ? JSON.stringify(value) : String(value)));
   } catch (e) {}
+}
+
+/** Run a nested diagnostic without letting its log into this one, and say so. The count is real: a reader
+ *  can see how much was held back, and the named entry point returns all of it on its own. */
+function CENSUS_quiet_(label, fn) {
+  var wasMuted = CENSUS_LOG_MUTED_, before = CENSUS_LOG_SUPPRESSED_, v = null, err = null;
+  CENSUS_LOG_MUTED_ = true;
+  try { v = fn(); } catch (e) { err = e; }
+  CENSUS_LOG_MUTED_ = wasMuted;
+  CENSUS_log_('nested_log_muted', label + ' — ' + (CENSUS_LOG_SUPPRESSED_ - before) + ' line(s) held back'
+    + ' so the compact proof cannot be pushed past the Logger cap. Nothing is lost: run ' + label
+    + ' directly for its own full log.');
+  if (err) throw err;
+  return v;
 }
 
 /**
@@ -5550,6 +5581,10 @@ function RUN_R6R7_CONTROLLED_AI_PLAN_PREFLIGHT() {
     // R6-R7-R2 — the allocator projection appears in the same execution log, and a reader needs to know
     // which of the two answers is about production BEFORE reading either.
     legacy_projection: null,
+    // R6-R7-R2-P1 — the run identity the proof reports, and the proof's own completeness. Declared here so
+    // that a preflight returning early still says what it could not establish instead of saying nothing.
+    current_run: null,
+    proof_complete: false, proof_missing: ['NOT_EVALUATED'],
     verdict: 'STOP', stop_reason: ''
   };
   function P(name, expected, observed, pass) { return CENSUS_r6r6r3P_(out, name, expected, observed, pass); }
@@ -5572,9 +5607,12 @@ function RUN_R6R7_CONTROLLED_AI_PLAN_PREFLIGHT() {
   P('allowlist_entry_is_this_scope', true, out.allowlist.scope_is_listed, out.allowlist.scope_is_listed === true);
 
   // ---- THE AUTHORITATIVE RECOMMENDATION, through §2 rather than through a second reader. --------------------
-  var rec = RUN_R6R7_RECOMMENDATION_AUTHORITY_CENSUS();
+  var rec = CENSUS_quiet_('RUN_R6R7_RECOMMENDATION_AUTHORITY_CENSUS',
+    function () { return RUN_R6R7_RECOMMENDATION_AUTHORITY_CENSUS(); });
   P('recommendation_authority_established', 'RECOMMENDATION_AUTHORITY_ESTABLISHED', rec.verdict,
     rec.verdict === 'RECOMMENDATION_AUTHORITY_ESTABLISHED');
+  // R6-R7-R2-P1 — WHICH evaluation this is, carried into the proof. Four fields, not the census.
+  out.current_run = rec.current_run || null;
   var standing = rec.suggested_qty ? rec.suggested_qty.standing_authority_value : null;
   var earliest = rec.suggested_qty ? rec.suggested_qty.ai_plan_dto_value : null;
   // ==============================================================================================================
@@ -5633,7 +5671,7 @@ function RUN_R6R7_CONTROLLED_AI_PLAN_PREFLIGHT() {
   P('no_quantity_was_invented_to_make_a_write_possible', true, true, true);
 
   // ---- THE MANUAL PLAN, frozen. -----------------------------------------------------------------------------
-  var res = RUN_R6R2_ROUTE_PROVENANCE();
+  var res = CENSUS_quiet_('RUN_R6R2_ROUTE_PROVENANCE', function () { return RUN_R6R2_ROUTE_PROVENANCE(); });
   if (res.error) {
     P('route_census_readable', 'the route census returns rows', 'error: ' + CENSUS_str_(res.error), false);
     out.stop_reason = 'the route census failed: ' + CENSUS_str_(res.error);
@@ -5717,7 +5755,10 @@ function RUN_R6R7_CONTROLLED_AI_PLAN_PREFLIGHT() {
 
   // ---- WHAT A GENERATION WOULD PROPOSE, from the pure plan builder the real run uses. -----------------------
   var e3 = null;
-  try { e3 = RUN_E3_CENSUS_RESUS_US_AMAZON_CO1100R(); } catch (eE) { e3 = null; }
+  try {
+    e3 = CENSUS_quiet_('RUN_E3_CENSUS_RESUS_US_AMAZON_CO1100R',
+      function () { return RUN_E3_CENSUS_RESUS_US_AMAZON_CO1100R(); });
+  } catch (eE) { e3 = null; }
   // ============================================================================================================
   // R6-R7-R2 — WHY THE LOG CARRIES A STOP AND A READY AT THE SAME TIME, SAID HERE RATHER THAN LEFT TO THE
   // READER. This call is how the preflight learns which ROUTES a generation would propose, and it prints its
@@ -6344,6 +6385,140 @@ var R6R7_REQUIRED_EXPORT_ = {
   RUN_R6R7_CONTROLLED_AI_PLAN_READBACK: ['counts']
 };
 
+// ================================================================================================================
+// THE BOUNDED PROOF. Everything an acceptance rests on, in one line small enough to survive.
+//
+// It carries no envelope, no per-scope array, no planned rows, no route snapshots, no harvest, no warehouses,
+// no carrier cards and no blocker prose — every one of those is unbounded, and one of them growing is what
+// takes the line past the cap again. The detailed export keeps all of it, unchanged, for debugging; this is
+// the line an operator keeps.
+// ================================================================================================================
+var R6R7_PROOF_CONTRACT_ = 'R6R7-PROOF-V1';
+var R6R7_PROOF_MAX_BYTES_ = 4096;
+
+function CENSUS_r6r7ProofRoute_(out, label) {
+  var snaps = out.manual_route_snapshots || [];
+  for (var i = 0; i < snaps.length; i++) if (snaps[i].label === label) return snaps[i];
+  return null;
+}
+
+function CENSUS_r6r7ProofObject_(out) {
+  var pp = out.production_path || {};
+  var pa = out.parity || {};
+  var lp = out.legacy_projection || {};
+  var cr = out.current_run || {};
+  // freshness is the canonical reader's own word for the snapshot, and it arrives with the production
+  // decision rather than with the page-side authority — so it is read from there, not restated.
+  var fr = (pp.authority && pp.authority.current_run) || {};
+  var A = CENSUS_r6r7ProofRoute_(out, 'A'), B = CENSUS_r6r7ProofRoute_(out, 'B');
+  return {
+    census: out.census, build: out.build, verdict: out.verdict,
+    predicates_passed: out.predicates_passed, predicates_failed: out.predicates_failed,
+    export_complete: out.export_complete === true,
+    export_missing: out.export_missing || [],
+    // Required by the proof's own guard: a proof that is incomplete has to say so IN the line that survives.
+    proof_complete: out.proof_complete === true,
+    proof_missing: out.proof_missing || [],
+
+    db_writes: CENSUS_num_(out.db_writes) || 0,
+    writer_calls: CENSUS_num_(out.writer_calls) || 0,
+    writer_constructed: out.writer_constructed === true,
+    submit_calls: CENSUS_num_(out.submit_calls) || 0,
+    route_save_calls: CENSUS_num_(out.route_save_calls) || 0,
+    reservation_writes: CENSUS_num_(out.reservation_writes) || 0,
+
+    current_run: {
+      calculation_run_id: cr.calculation_run_id === undefined ? null : cr.calculation_run_id,
+      calculation_date: (cr.calculation_date === undefined ? null : cr.calculation_date)
+        || (fr.calculation_date === undefined ? null : fr.calculation_date),
+      calculation_status: cr.calculation_status === undefined ? null : cr.calculation_status,
+      freshness_state: fr.freshness_state === undefined ? null : fr.freshness_state
+    },
+
+    recommendation: {
+      state: pp.recommendation_state === undefined ? null : pp.recommendation_state,
+      recommended_qty: pp.recommended_qty === undefined ? null : pp.recommended_qty,
+      qualifying_active_planned_qty: pp.qualifying_active_planned_qty === undefined
+        ? null : pp.qualifying_active_planned_qty,
+      residual_qty: pp.residual_qty === undefined ? null : pp.residual_qty
+    },
+
+    production_path: {
+      available: pp.available === true,
+      entry_point: pp.entry_point || null,
+      decision_source: pp.decision_source || null,
+      outcome: pp.outcome || null,
+      code: pp.code || null,
+      reason: pp.reason || null,
+      recommendation_state: pp.recommendation_state || null,
+      would_write: pp.would_write === true,
+      writer_reached: pp.writer_reached === true,
+      requested_scope_empty_is_bypassed_by_valid_zero:
+        pp.requested_scope_empty_is_bypassed_by_valid_zero === true
+    },
+
+    parity: {
+      wrapper_verdict: pa.wrapper_verdict || null,
+      production_outcome: pa.production_outcome || null,
+      agree: pa.agree === undefined ? null : pa.agree,
+      production_would_write: pa.production_would_write === undefined ? null : pa.production_would_write,
+      wrapper_never_outranks_production: pa.wrapper_never_outranks_production === undefined
+        ? null : pa.wrapper_never_outranks_production
+    },
+
+    legacy_projection: {
+      projection_class: lp.projection_class || null,
+      verdict: lp.verdict || null,
+      verdict_scope: lp.verdict_scope || null,
+      is_production_generation_authority: lp.is_production_generation_authority === undefined
+        ? null : lp.is_production_generation_authority
+    },
+
+    manual_routes: {
+      row_count: (out.before_counts && out.before_counts.visible_route_rows) === undefined
+        ? null : out.before_counts.visible_route_rows,
+      planned_total: out.current_manual_planned_total === undefined ? null : out.current_manual_planned_total,
+      route_a_id: A ? A.allocation_draft_id : null,
+      route_a_version: (A && A.observed) ? CENSUS_str_(A.observed.draft_version) : null,
+      route_b_id: B ? B.allocation_draft_id : null,
+      route_b_version: (B && B.observed) ? CENSUS_str_(B.observed.draft_version) : null
+    },
+
+    stop_reason: out.stop_reason || ''
+  };
+}
+
+/**
+ * The proof's own completeness guard. It runs BEFORE the verdict is printed anywhere, because a verdict that
+ * has already been announced cannot be withdrawn by a later line — which is the ordering mistake this file
+ * has now made twice.
+ *
+ * The last check is not about presence. A run that WOULD WRITE is not a no-action, and a proof asserting both
+ * at once is the one shape an operator must never be handed as an acceptance.
+ */
+function CENSUS_r6r7ProofGuard_(out) {
+  var pp = out.production_path || {};
+  var pa = out.parity || {};
+  var lp = out.legacy_projection || {};
+  var missing = [];
+  if (!out.production_path || pp.available !== true || !pp.outcome) missing.push('production_path.outcome');
+  if (!out.parity || !pa.production_outcome || typeof pa.agree !== 'boolean') missing.push('parity');
+  if (!out.legacy_projection || lp.is_production_generation_authority !== false) {
+    missing.push('legacy_projection.is_production_generation_authority');
+  }
+  if (out.verdict === 'READY_NO_ACTION' && pa.production_would_write === true) {
+    missing.push('production_would_write_contradicts_READY_NO_ACTION');
+  }
+  out.proof_complete = missing.length === 0;
+  out.proof_missing = missing;
+  if (!out.proof_complete) {
+    out.verdict = 'STOP';
+    out.stop_reason = (out.stop_reason ? out.stop_reason + ' ' : '')
+      + 'PROOF_INCOMPLETE: ' + missing.join(', ') + '.';
+  }
+  return out.proof_complete;
+}
+
 // The shared exit. Asserts the read-only facts on the way out and prints ONE complete line to the log, because
 // the Apps Script editor shows the execution log and not the returned object.
 function CENSUS_r6r7Finish_(out) {
@@ -6353,8 +6528,9 @@ function CENSUS_r6r7Finish_(out) {
   out.writer_calls = CENSUS_num_(out.writer_calls) || 0;
   out.submit_calls = CENSUS_num_(out.submit_calls) || 0;
   out.reservation_writes = CENSUS_num_(out.reservation_writes) || 0;
-  CENSUS_log_('r6r7', out.census + ' ' + out.verdict + ' — passed ' + out.predicates_passed
-    + ' failed ' + out.predicates_failed);
+  // R6-R7-R2-P1 — THE GUARDS RUN BEFORE ANY VERDICT IS PRINTED. They used to run after the summary line,
+  // so a run that a guard turned into a STOP had already announced a success one line above it.
+  //
   // THE DECLARED EVIDENCE MUST BE THERE BEFORE THE VERDICT STANDS.
   var required = R6R7_REQUIRED_EXPORT_[out.census] || [];
   var absent = required.filter(function (k) { return out[k] === null || out[k] === undefined; });
@@ -6367,6 +6543,28 @@ function CENSUS_r6r7Finish_(out) {
       + ' report, and a verdict a reader cannot check is not one.';
     CENSUS_log_('r6r7_export_incomplete', absent.join(', '));
   }
+  // The preflight is the census an acceptance is read from, so it is the one that carries a bounded proof.
+  var wantsProof = out.census === 'RUN_R6R7_CONTROLLED_AI_PLAN_PREFLIGHT';
+  if (wantsProof) CENSUS_r6r7ProofGuard_(out);
+
+  CENSUS_log_('r6r7', out.census + ' ' + out.verdict + ' — passed ' + out.predicates_passed
+    + ' failed ' + out.predicates_failed);
+
+  // ---- THE PROOF, BEFORE THE DETAILED EXPORT. Apps Script truncates the tail; this line is what must
+  //      survive, so nothing unbounded is allowed above it and nothing at all is allowed between.
+  if (wantsProof) {
+    var proofLine = null;
+    try { proofLine = JSON.stringify(CENSUS_r6r7ProofObject_(out)); }
+    catch (eP) { proofLine = null; CENSUS_log_('r6r7_proof_failed', CENSUS_str_(eP && eP.message)); }
+    if (proofLine !== null) {
+      CENSUS_log_('r6r7_proof', proofLine);
+      CENSUS_log_('r6r7_proof_meta', JSON.stringify({ contract: R6R7_PROOF_CONTRACT_,
+        bytes: proofLine.length, max_bytes: R6R7_PROOF_MAX_BYTES_,
+        within_bounds: proofLine.length <= R6R7_PROOF_MAX_BYTES_,
+        detailed_export_follows: true }));
+    }
+  }
+
   var payload = {
     census: out.census, build: out.build, verdict: out.verdict,
     predicates_passed: out.predicates_passed, predicates_failed: out.predicates_failed,
@@ -6388,6 +6586,8 @@ function CENSUS_r6r7Finish_(out) {
     legacy_projection: out.legacy_projection || null,
     export_complete: out.export_complete,
     export_missing: out.export_missing || [],
+    proof_complete: out.proof_complete === undefined ? null : out.proof_complete,
+    proof_missing: out.proof_missing || [],
     stop_reason: out.stop_reason || ''
   };
   try { CENSUS_log_('r6r7_export', JSON.stringify(payload)); }
