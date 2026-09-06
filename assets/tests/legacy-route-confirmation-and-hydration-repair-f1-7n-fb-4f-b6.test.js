@@ -236,6 +236,16 @@ function saveRoute(scope, opts) {
   var _hasId = !!String(header.allocation_draft_id || '').trim();
   var _adopting = opts.allow === true;
   var _intent = _adopting ? undefined : (_hasId ? 'UPDATE_EXISTING_ROUTE' : 'CREATE_NEW_ROUTE');
+  // R6-R6-R4-R2 — AN UPDATE NOW DECLARES THE VERSION IT READ. This shim mirrors the shipped client, and the
+  // shipped client sends expected_draft_version on every UPDATE_EXISTING_ROUTE; 16_ refuses one that does not
+  // (MISSING_OPTIMISTIC_TOKEN, zero rows written). Read from the stored row, exactly as the page reads it from
+  // the version it hydrated — never computed, and never filled in by the writer.
+  if (_intent === 'UPDATE_EXISTING_ROUTE' && header.expected_draft_version == null) {
+    headerObjs().forEach(function (o) {
+      if (String(o.allocation_draft_id || '') === String(header.allocation_draft_id || '')
+          && String(o.draft_version || '') !== '') header.expected_draft_version = String(o.draft_version);
+    });
+  }
   return sadAtomicUpsertCore_({ header: header, lines: opts.lines || [],
     intent: _intent,
     create_idempotency_key: (_adopting || _hasId) ? undefined : ('CRI-B6-' + (++__criSeq)),

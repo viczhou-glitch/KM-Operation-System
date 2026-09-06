@@ -67,7 +67,7 @@
 // §9 — THE CENSUS WAS REPORTING A BUILD IT NO LONGER WAS. Its behaviour changed in A2-R1-R1 (it learned to
 // read the harvest REFUSAL) and again in A2-R1-R2 (route intent + identity preview) while this literal stayed
 // at A2-R1, so a log could not be matched to the code that produced it. It moves with the file now.
-var TEMP_E3_CENSUS_BUILD_ = 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R6-R4-R1';
+var TEMP_E3_CENSUS_BUILD_ = 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R6-R4-R2';
 
 /** Read-only row reader. The Sheet object stays inside this function — the caller gets values, never a writer. */
 // R6-R3 §2 — the OPTIONAL third argument is a metrics sink. §2 requires the diagnostic to report how many
@@ -4481,7 +4481,17 @@ var R6R6R4_SAVE_MECHANIC_ = 'change Route A Last Mile ONCE and wait for the debo
   + ' state cell is the acknowledgement. Do not edit twice, and do not press Submit Plan.';
 var R6R6R4_AUTHORIZED_ACTION_ = 'Route A last_mile_delivery truck -> parcel: ' + R6R6R4_SAVE_MECHANIC_
   + ' This is an ISOLATION TEST, not a shipping decision: stage two restores it to truck.';
-var R6R6R4_A_AFTER_LAST_MILE_ = 'parcel';
+// R6-R6-R4-R2 — STAGE ONE HAS HAPPENED, so the BEFORE is the row it left behind and the authorized change
+// is the way back. `R6R6R4_A_BEFORE_` below carries parcel at version 3; the stage-one freeze (truck at 2) is
+// a correct record of a moment that has passed, and a readiness still holding it would be checking today's
+// database against this morning's.
+var R6R6R4_A_AFTER_LAST_MILE_ = 'truck';
+var R6R6R4_A_AFTER_DRAFT_VERSION_ = '4';
+// STAGE TWO IS NOT AUTHORIZED BY THIS ROUND. A readiness that says READY says the row is in the state the
+// design expects — it has never been permission, and the manifest is what records that permission is
+// absent. Stage two additionally requires the R6-R6-R4-R2 fix to be DEPLOYED and the browser audit to show
+// expected_draft_version '3' on the request, because a write with no precondition is what this round found.
+var R6R6R4_STAGE_TWO_AUTHORIZED_ = false;
 var R6R6R4_PAGE_ACTOR_ = 'inventory-replenishment';      // 16_ line 499: body.created_by || this
 var R6R6R4_REPAIR_ACTOR_ = 'r6r6r3-compensating-repair'; // what R6-R6-R3 sent as created_by
 
@@ -4497,14 +4507,16 @@ var R6R6R4_A_BEFORE_ = {
   destination_kind: 'MARKETPLACE', destination_id: 'amazon', destination_marketplace: 'amazon',
   quantity: 320,
   shipping_method: 'sea_express',
-  last_mile_delivery: 'truck',
+  // R6-R6-R4-R2 — what stage one actually left: parcel, version 3, the parcel key, and the two stamps the
+  // Save wrote. Read off production after SINGLE_ROW_MUTATION_CONFIRMED (58 of 58).
+  last_mile_delivery: 'parcel',
   expected_arrival: '',
-  k4_group_key: '|resus|us|amazon|inventory_replenishment|wh-tw-cn-factory-youxin|marketplace|amazon|sea_express|truck|',
+  k4_group_key: '|resus|us|amazon|inventory_replenishment|wh-tw-cn-factory-youxin|marketplace|amazon|sea_express|parcel|',
   status: 'draft', line_status: '', generation_type: 'user_created',
   ownership: 'MANUAL (no generation_run_id — composed by a person)',
-  draft_version: '2',
-  updated_at: 'Sun Sep 06 2026 08:27:53 GMT+0800 (Taiwan Standard Time)',
-  line_updated_at: 'Sun Sep 06 2026 08:27:53 GMT+0800 (Taiwan Standard Time)',
+  draft_version: '3',
+  updated_at: 'Sun Sep 06 2026 13:05:49 GMT+0800 (Taiwan Standard Time)',
+  line_updated_at: 'Sun Sep 06 2026 13:05:49 GMT+0800 (Taiwan Standard Time)',
   updated_by: 'inventory-replenishment'
 };
 // ---- ROUTE B. The bystander. Nothing about it is authorized to change, in either direction. -------------------
@@ -4611,6 +4623,12 @@ function RUN_R6R6R4_SINGLE_ROW_SAVE_READINESS() {
     target: R6R6R4_A_TARGET_, bystander: R6R6R4_B_BYSTANDER_,
     authorized_action: R6R6R4_AUTHORIZED_ACTION_,
     save_mechanic: R6R6R4_SAVE_MECHANIC_,
+    stage: 'TWO',
+    authorized_this_round: R6R6R4_STAGE_TWO_AUTHORIZED_,
+    next_action: 'READY here means the rows are in the state stage two expects. It is NOT permission.'
+      + ' Stage two needs the R6-R6-R4-R2 fix deployed AND a browser audit showing'
+      + ' expected_draft_version "3" on the request, because stage one was written with no optimistic'
+      + ' precondition at all and nobody could see it until the audit reported null.',
     predicates: [], predicates_passed: 0, predicates_failed: 0,
     snapshot_gaps: [],
     derived_gates: [],
@@ -4647,8 +4665,9 @@ function RUN_R6R6R4_SINGLE_ROW_SAVE_READINESS() {
   // has already happened, and an operator who cannot tell those apart performs the edit twice.
   out.route_a_observed = CENSUS_r6r6r4Observe_(a, CENSUS_r6r6r4Fields_());
   out.already_saved = !!a && CENSUS_str_(a.last_mile_delivery).toLowerCase() === R6R6R4_A_AFTER_LAST_MILE_
-    && CENSUS_str_(a.draft_version) === '3';
-  CENSUS_r6r6r3P_(out, 'route_a_save_has_not_already_happened', 'last mile truck at version 2',
+    && CENSUS_str_(a.draft_version) === R6R6R4_A_AFTER_DRAFT_VERSION_;
+  CENSUS_r6r6r3P_(out, 'route_a_save_has_not_already_happened',
+    'last mile ' + R6R6R4_A_BEFORE_.last_mile_delivery + ' at version ' + R6R6R4_A_BEFORE_.draft_version,
     a ? (CENSUS_str_(a.last_mile_delivery) + ' at version ' + CENSUS_str_(a.draft_version)) : null,
     !!a && !out.already_saved);
 
@@ -4765,8 +4784,9 @@ function RUN_R6R6R4_SINGLE_ROW_SAVE_READBACK() {
     a ? CENSUS_str_(a.last_mile_delivery) : null,
     !!a && CENSUS_str_(a.last_mile_delivery).toLowerCase() === R6R6R4_A_AFTER_LAST_MILE_);
   // EXACTLY ONE STEP. No step means the write never landed; two means something wrote twice.
-  CENSUS_r6r6r3P_(out, 'route_a_draft_version_advanced_by_exactly_one', '3',
-    a ? CENSUS_str_(a.draft_version) : null, !!a && CENSUS_str_(a.draft_version) === '3');
+  CENSUS_r6r6r3P_(out, 'route_a_draft_version_advanced_by_exactly_one', R6R6R4_A_AFTER_DRAFT_VERSION_,
+    a ? CENSUS_str_(a.draft_version) : null,
+    !!a && CENSUS_str_(a.draft_version) === R6R6R4_A_AFTER_DRAFT_VERSION_);
   out.k4_expected_after = CENSUS_r6r6r4K4Swap_(R6R6R4_A_BEFORE_.k4_group_key,
     R6R6R4_A_BEFORE_.last_mile_delivery, R6R6R4_A_AFTER_LAST_MILE_);
   out.k4_actual_after = a ? CENSUS_str_(a.k4_group_key) : null;
@@ -4849,15 +4869,30 @@ function RUN_R6R6R4_RESTORE_STAGE_TWO_MANIFEST() {
     executed: false,            // ALWAYS false. There is no write path in this function.
     blocked_by: 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R6-R4 §7 authorizes stage one only. Stage two requires stage'
       + ' one to have returned SINGLE_ROW_MUTATION_CONFIRMED and a separate current-turn authorization.',
-    precondition: 'RUN_R6R6R4_SINGLE_ROW_SAVE_READBACK returns SINGLE_ROW_MUTATION_CONFIRMED with zero failed'
-      + ' predicates. Until then the starting point of stage two is not established.',
+    precondition: 'THREE things, all of them: (1) RUN_R6R6R4_SINGLE_ROW_SAVE_READINESS returns'
+      + ' SINGLE_ROW_SAVE_READY with zero failed predicates; (2) the R6-R6-R4-R2 fix is DEPLOYED — the page'
+      + ' carries data-draft-version and 16_ refuses an UPDATE_EXISTING_ROUTE with no expected_draft_version;'
+      + ' (3) a browser mutation audit of the stage-two request shows expected_draft_version "3", not null.',
     action: 'Route A last_mile_delivery parcel -> truck: ' + R6R6R4_SAVE_MECHANIC_,
+    // R6-R6-R4-R2 — THE PRECONDITION THAT WAS MISSING. Stage one committed with expected_draft_version
+    // absent: the client lost the version at the DOM collect and 16_ only checked when the field was there.
+    // Stage two must be the first Execution Plan write in this investigation to carry a real precondition.
+    requires_optimistic_token: '3',
+    root_cause_fix: 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R6-R4-R2 — MUTATION_CONTRACT_DEFECT, not a telemetry one.'
+      + ' The DOM collector rebuilt every route row and did not carry draft_version, so the hydrated version'
+      + ' was destroyed by the first edit and the header omitted expected_draft_version; 16_ ran its'
+      + ' optimistic check only when that field was PRESENT, so the write committed with no precondition and'
+      + ' the version advanced anyway. Fixed on both sides: the row carries data-draft-version through the'
+      + ' DOM, and an UPDATE_EXISTING_ROUTE with no expected_draft_version is now MISSING_OPTIMISTIC_TOKEN'
+      + ' with zero rows written.',
     expected: {
-      route_a_last_mile_before: R6R6R4_A_AFTER_LAST_MILE_,
-      route_a_last_mile_after: R6R6R4_A_BEFORE_.last_mile_delivery,
-      route_a_draft_version_before: '3',
-      route_a_draft_version_after: '4',
-      route_a_k4_after: R6R6R4_A_BEFORE_.k4_group_key,
+      route_a_last_mile_before: R6R6R4_A_BEFORE_.last_mile_delivery,
+      route_a_last_mile_after: R6R6R4_A_AFTER_LAST_MILE_,
+      route_a_expected_draft_version_sent: R6R6R4_A_BEFORE_.draft_version,
+      route_a_draft_version_before: R6R6R4_A_BEFORE_.draft_version,
+      route_a_draft_version_after: R6R6R4_A_AFTER_DRAFT_VERSION_,
+      route_a_k4_after: CENSUS_r6r6r4K4Swap_(R6R6R4_A_BEFORE_.k4_group_key,
+        R6R6R4_A_BEFORE_.last_mile_delivery, R6R6R4_A_AFTER_LAST_MILE_),
       route_a_updated_by_after: R6R6R4_PAGE_ACTOR_,
       route_b: 'every field unchanged, draft_version still 3, updated_by still ' + R6R6R4_REPAIR_ACTOR_,
       set: R6R6R4_SET_BEFORE_

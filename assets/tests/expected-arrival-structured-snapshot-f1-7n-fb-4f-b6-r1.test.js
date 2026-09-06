@@ -422,8 +422,21 @@ section('G — [tests 13, 14, 15, 16, 20] THE SERVER SIDE IS ALREADY CAPABLE, AN
   function resetSavedId() { __savedId = ''; }
   var __criSeq = 0;
   function save(service, eta, qty) {
+  // R6-R6-R4-R2 — AN UPDATE NOW DECLARES THE VERSION IT READ. This shim mirrors the shipped client, and the
+  // shipped client sends expected_draft_version on every UPDATE_EXISTING_ROUTE; 16_ refuses one that does not
+  // (MISSING_OPTIMISTIC_TOKEN, zero rows written). Read from the stored row, exactly as the page reads it from
+  // the version it hydrated — never computed, and never filled in by the writer.
+    var _expVer = '';
+    if (__savedId) {
+      var _hs = SHEETS['shipping_allocation_drafts'];
+      var _hh = _hs.rows[0], _hi = _hh.indexOf('allocation_draft_id'), _vi = _hh.indexOf('draft_version');
+      for (var _r = 1; _r < _hs.rows.length; _r++) {
+        if (String(_hs.rows[_r][_hi]) === String(__savedId)) _expVer = String(_hs.rows[_r][_vi] || '');
+      }
+    }
     var res = sadAtomicUpsertCore_({ header: {
         allocation_draft_id: __savedId || undefined,
+        expected_draft_version: (__savedId && _expVer) ? _expVer : undefined,
         company: 'ResUS', country: 'US', marketplace: 'Amazon', source_page: 'inventory_replenishment',
         recommended_source_warehouse_id: 'WH-CN-01', recommended_destination_warehouse_id: '',
         destination_marketplace: 'Amazon', recommended_shipping_method: service },

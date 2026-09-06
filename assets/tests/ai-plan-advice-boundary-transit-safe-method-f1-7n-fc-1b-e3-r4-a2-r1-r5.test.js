@@ -687,8 +687,13 @@ var G69L = read(GS + '69_api_v1_ai_plan_lifecycle.gs');
 eq(/var AIPL_BUILD_VERSION_ = '([^']*)'/.exec(G69L)[1], 'F1-7N-FC-1B-E3-R4-A2-R1-R1',
   'E3  69_ lifecycle declares the round it last changed in \u2014 it had been three rounds stale, which is exactly ' +
   'why a label comparison called a mixed deployment UNIFORM');
-eq(/var SAD_BUILD_VERSION_ = '([^']*)'/.exec(read(GS + '16_shipping_allocation_handlers.gs'))[1],
-   'F1-7N-FC-1B-E3-R4-A2-R1-R2', 'E3a 16_ likewise');
+// R6-R6-R4-R2 — DERIVED. This pinned the round 16_ had last changed in, which is an equality with now:
+// the next round to touch the writer breaks it, and E4 below already enforces the durable property (no
+// stamp older than its file's last change). What this line owns is that the stamp is not STALE.
+var _sadStamp = /var SAD_BUILD_VERSION_ = '([^']*)'/.exec(read(GS + '16_shipping_allocation_handlers.gs'))[1];
+ok(RO.OWNER_STAMPS.indexOf(_sadStamp) >= RO.OWNER_STAMPS.indexOf('F1-7N-FC-1B-E3-R4-A2-R1-R2'),
+  'E3a 16_ likewise, at or after the round it had gone stale in (' + _sadStamp + ')');
+ok(RO.BUILD_STAMP_RE.test(_sadStamp), 'E3a1 and it is a well-formed stamp');
 // RESTATED (A2-R1-R6): a pinned stamp literal. R6 changes 00_config again (§1), so the durable claim is a
 // FLOOR against the shared ledger — the stamp is at or after the round that last rotated it.
 ok(RO.stampAtOrAfter(/var CONFIG_BUILD_VERSION_ = '([^']*)'/.exec(CFG)[1], 'F1-7N-FC-1B-E3-R4-A2-R1-R5'),

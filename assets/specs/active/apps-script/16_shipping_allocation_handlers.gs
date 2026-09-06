@@ -909,7 +909,10 @@ function sadFindLineByNaturalKey_(sh, draftId, l) {
 // this file (the pre-write duplicate-PK gate and the route-group keys on the write response).
 // F1-7N-FC-1B-E3-R4-A2-R1-R5 §10 — also never rotated. This file last changed in
 // F1-7N-FC-1B-E3-R4-A2-R1-R2; the label was left at the round before that.
-var SAD_BUILD_VERSION_ = 'F1-7N-FC-1B-E3-R4-A2-R1-R2';
+// R6-R6-R4-R2 — moved because THIS FILE changed: an UPDATE_EXISTING_ROUTE that declares no
+// expected_draft_version is now MISSING_OPTIMISTIC_TOKEN with zero rows written, and the documented
+// top-level field is finally read. A stamp records the round a module last changed; it is not the release.
+var SAD_BUILD_VERSION_ = 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R6-R4-R2';
 
 var SAD_K2_GROUP_DIMENSIONS_ = ['planning_cycle', 'company', 'country', 'marketplace', 'source_page',
   'recommended_source_warehouse_id', 'recommended_destination_warehouse_id',
@@ -2087,12 +2090,30 @@ function sadAtomicUpsertCore_(body) {
   if (found) {
     var priorHeaderObj = sadRowToObject_(hSh, found.row);
     priorVersion = sadFpVal_(priorHeaderObj.draft_version);
-    // optimistic token (stale → CONFLICT, zero write)
-    if (header.expected_draft_version != null && sadFpVal_(header.expected_draft_version) !== priorVersion) {
+    // optimistic token (missing or stale → CONFLICT, zero write)
+    // F1-7N-FC-1B-E3-R4-A2-R1-R6-R6-R4-R2 — read from the header FIRST and the documented top-level field
+    // second, and treat a BLANK as absent rather than as the number zero.
+    var sadExpDeclared = (header.expected_draft_version != null
+        && String(header.expected_draft_version).trim() !== '') ? header.expected_draft_version
+      : ((body && body.expected_draft_version != null
+        && String(body.expected_draft_version).trim() !== '') ? body.expected_draft_version : null);
+    // A DECLARED UPDATE MUST DECLARE WHAT IT EXPECTS. Only for UPDATE_EXISTING_ROUTE: a CREATE has no prior
+    // version, and a cancel carries no route intent. Zero write, typed, and it publishes the current version
+    // so the client can adopt it and re-offer the edit rather than guess.
+    if (sadIntent === 'UPDATE_EXISTING_ROUTE' && sadExpDeclared === null) {
+      return jsonResponse_({ success: false,
+        error: 'MISSING_OPTIMISTIC_TOKEN — an UPDATE_EXISTING_ROUTE must declare expected_draft_version;'
+          + ' the row named is at ' + priorVersion + ' (zero rows written). Reload the Execution Plan and'
+          + ' make the edit again — an out-of-date page cannot state which version it read.',
+        code: 'MISSING_OPTIMISTIC_TOKEN', stage: 'conflict', zero_write: true,
+        data: { allocation_draft_id: id, intent: sadIntent, current: priorVersion,
+          current_draft_version: priorVersion, expected: null } });
+    }
+    if (sadExpDeclared != null && sadFpVal_(sadExpDeclared) !== priorVersion) {
       // F1-7N-FB-4G-A2-R3-R1 §F3 — this refusal named itself only inside the prose. It now carries the typed
       // code as a field like every other refusal, and it publishes the CURRENT version so the client can adopt
       // it and re-offer the edit instead of retrying the same stale number for ever.
-      return jsonResponse_({ success: false, error: 'STALE_OPTIMISTIC_TOKEN — expected draft_version ' + sadFpVal_(header.expected_draft_version) + ' but current is ' + priorVersion + ' (zero rows written)', code: 'STALE_OPTIMISTIC_TOKEN', stage: 'conflict', zero_write: true, data: { expected: sadFpVal_(header.expected_draft_version), current: priorVersion, allocation_draft_id: id, current_draft_version: priorVersion } });
+      return jsonResponse_({ success: false, error: 'STALE_OPTIMISTIC_TOKEN — expected draft_version ' + sadFpVal_(sadExpDeclared) + ' but current is ' + priorVersion + ' (zero rows written)', code: 'STALE_OPTIMISTIC_TOKEN', stage: 'conflict', zero_write: true, data: { expected: sadFpVal_(sadExpDeclared), current: priorVersion, allocation_draft_id: id, current_draft_version: priorVersion } });
     }
     var priorLines = sadReadLinesForDraft_(lSh, id);
     var priorFp = sadK2PayloadFingerprint_(priorHeaderObj, priorLines);

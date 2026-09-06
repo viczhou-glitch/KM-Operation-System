@@ -321,8 +321,15 @@ section('§4 — one constant was answering two questions');
 var relDecl = /var SYS_DEPLOYMENT_RELEASE_ = '([^']*)'/.exec(HEALTH);
 var sysDecl = /var SYS_BUILD_VERSION_ = '([^']*)'/.exec(HEALTH);
 ok(relDecl, 'D1  there is now a DEPLOYMENT RELEASE constant, distinct from the module stamp');
-eq(relDecl[1], RELEASE, 'D1a set to this release');
-eq(sysDecl[1], RELEASE, 'D1b and 63_\'s own module stamp moved too, because 63_ changed this round');
+// R6-R6-R4-R2 — both were equalities with now. What this suite owns is that the release constant EXISTS,
+// that it is at or after the round this suite belongs to, and that 63_'s own stamp moved with it because
+// 63_ changed — none of which requires knowing which round is the last one.
+ok(RO.OWNER_STAMPS.indexOf(relDecl[1]) >= RO.OWNER_STAMPS.indexOf(RELEASE),
+  'D1a set to this release or a later one (' + relDecl[1] + ')');
+ok(RO.OWNER_STAMPS.indexOf(sysDecl[1]) >= RO.OWNER_STAMPS.indexOf(RELEASE),
+  'D1b and 63_\'s own module stamp moved too, because 63_ changed (' + sysDecl[1] + ')');
+ok(RO.BUILD_STAMP_RE.test(relDecl[1]) && RO.BUILD_STAMP_RE.test(sysDecl[1]),
+  'D1b1 and both are well-formed stamps');
 ok(RO.stampAtOrAfter(relDecl[1], 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R5'),
   'D1c the release never moves backwards, checked against the shared ledger');
 // The identity block names each build individually. The live confusion was one string standing for four facts.

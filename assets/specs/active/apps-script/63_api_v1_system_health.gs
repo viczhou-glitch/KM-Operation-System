@@ -78,9 +78,15 @@ var SYS_API_CONTRACT_VERSION_ = '1';
 // needs both — which is why the identity block below now names each build it can see, individually, instead
 // of publishing one string and leaving the operator to guess its scope.
 // ------------------------------------------------------------------------------------------------------------
-var SYS_DEPLOYMENT_RELEASE_ = 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R6';
+// R6-R6-R4-R2 — THE RELEASE MOVES, because this round changes 16_ (an UPDATE that declares no
+// expected_draft_version is now refused) and therefore REQUIRES a new Web App deployment version. The
+// release says which release a deployment intends to be; leaving it behind would report a deployment
+// carrying the new refusal as though it were the one that did not have it.
+var SYS_DEPLOYMENT_RELEASE_ = 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R6-R4-R2';
 // 63_'s OWN module build stamp — the round in which THIS FILE last changed. Not the release; see above.
-var SYS_BUILD_VERSION_ = 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R6';
+// R6-R6-R4-R2 — moved because 16_'s manifest row moved with 16_ itself. The RELEASE above is deliberately
+// not marched to it: it says which release this deployment intends to be, and cutting one is the user's act.
+var SYS_BUILD_VERSION_ = 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R6-R4-R2';
 // ------------------------------------------------------------------------------------------------------------
 // F1-7N-FB-4E §H — THE SHARED-TRANSPORT CONTRACT IS A SEPARATE AXIS FROM THE ACTION CONTRACT.
 //
@@ -284,7 +290,7 @@ var SYS_MODULE_BUILD_STAMPS_ = [
   // this file, so it can never fail and proves nothing about 63_. A stale 63_ is caught earlier and by other
   // evidence (its deployed_action_contract_version is older than the frontend's pinned minimum). The entry is
   // kept because the row is what publishes 63_'s own module build to a reader, not because it is a check.
-  { file: '63_api_v1_system_health.gs', symbol: 'SYS_BUILD_VERSION_', expected: 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R6', owns: 'this module: deployment identity + health + transport contract + the effective feature-flag report (self-referential row — not a partial-sync check)' },
+  { file: '63_api_v1_system_health.gs', symbol: 'SYS_BUILD_VERSION_', expected: 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R6-R4-R2', owns: 'this module: deployment identity + health + transport contract + the effective feature-flag report (self-referential row — not a partial-sync check)' },
   // F1-7N-FC-1B-E3 §E.9 — the CONFIG is an owner file too. It holds
   // INVENTORY_AI_PLAN_DB_GENERATION_ENABLED_, so a project still running the previous copy of it writes no
   // allocation drafts while the repository says it should; without an entry here that difference had no name.
@@ -313,7 +319,7 @@ var SYS_MODULE_BUILD_STAMPS_ = [
   // moves and this expectation moves with it. The pair is the partial-sync detector for this deployment set:
   // sync 16_ without 63_ and the stale manifest still expects F1-7N-FB-4D; sync 63_ without 16_ and the new
   // manifest expects B3 while the file declares 4D. Either direction reports mixed_deployment.
-  { file: '16_shipping_allocation_handlers.gs', symbol: 'SAD_BUILD_VERSION_', expected: 'F1-7N-FC-1B-E3-R4-A2-R1-R2', owns: 'Execution Plan allocation draft header/line writer (schema-compatible 30..35 header / 30..31 line, route group keys)' },
+  { file: '16_shipping_allocation_handlers.gs', symbol: 'SAD_BUILD_VERSION_', expected: 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R6-R4-R2', owns: 'Execution Plan allocation draft header/line writer (schema-compatible 30..35 header / 30..31 line, route group keys)' },
   // F1-7N-FB-4F-B3 — REGISTERED HERE FOR THE REASON THIS MANIFEST EXISTS. B1 landed the route-identity contract
   // deliberately unmanifested because it was inert. It is not inert any more: 16_ now calls into it for the
   // typed schema refusals and for the K4 identity, so a deployment carrying the B3 writer WITHOUT this file

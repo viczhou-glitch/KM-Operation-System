@@ -90,7 +90,10 @@ var A_HEADER = 'SADH-K4-38523A90', A_LINE = 'SADL-K2-92B8BAD2';
 var B_HEADER = 'SADH-K4-A3872518', B_LINE = 'SADL-K2-344FB2B2';
 // The audit trail as production left it after the two rounds. Route A has not been written since the
 // incident; Route B was last written by the compensation, at an instant nobody reported.
+// R6-R6-R4-R2 — STAGE ONE HAS HAPPENED. TS_A is the stamp the INCIDENT left and TS_A_NOW is the stamp
+// stage one wrote; Route A is at parcel / version 3, and the authorized change is now the way back.
 var TS_A = 'Sun Sep 06 2026 08:27:53 GMT+0800 (Taiwan Standard Time)';
+var TS_A_NOW = 'Sun Sep 06 2026 13:05:49 GMT+0800 (Taiwan Standard Time)';
 var TS_INCIDENT_B = 'Sun Sep 06 2026 08:28:04 GMT+0800 (Taiwan Standard Time)';
 // R6-R6-R4-R1 — the instant the compensation actually stamped, read off production. R6-R6-R4 used a
 // plausible placeholder here because the real one had not been reported and the freeze carried null; both
@@ -183,10 +186,10 @@ function lineRow(o) { var d = {
   Object.keys(o || {}).forEach(function (k) { d[k] = o[k]; }); return d; }
 
 var PROD_A_H = headerRow({ allocation_draft_id: A_HEADER, destination_marketplace: 'Amazon',
-  recommended_shipping_method: 'sea_express', recommended_last_mile_delivery: 'truck',
-  draft_version: '2', updated_at: TS_A, updated_by: PAGE_ACTOR });
+  recommended_shipping_method: 'sea_express', recommended_last_mile_delivery: 'parcel',
+  draft_version: '3', updated_at: TS_A_NOW, updated_by: PAGE_ACTOR });
 var PROD_A_L = lineRow({ allocation_draft_line_id: A_LINE, allocation_draft_id: A_HEADER,
-  planned_qty: '320', updated_at: TS_A });
+  planned_qty: '320', updated_at: TS_A_NOW });
 // Route B AFTER the compensation: blank last mile, version 3, and the repair as the recorded actor.
 var PROD_B_H = headerRow({ allocation_draft_id: B_HEADER,
   recommended_destination_warehouse_id: 'WH-RESUS-US-3PL-AMZLGS',
@@ -199,7 +202,7 @@ var PROD_B_L = lineRow({ allocation_draft_line_id: B_LINE, allocation_draft_id: 
 // ================================================================================================================
 // THE WORLD.
 // ================================================================================================================
-function World(over, censusSrc) {
+function World(over, censusSrc, g16Src) {
   over = over || {};
   var sheets = {};
   var H = new FakeSheet(HDR_FULL), L = new FakeSheet(LINE_FULL);
@@ -264,10 +267,11 @@ function World(over, censusSrc) {
   ].join(NL), ctx);
   vm.runInContext([extractFn(G13, 'procurementEnsureSheet_'), extractFn(G13, 'procurementAppendByHeader_'),
     extractFn(G13, 'procurementFindRow_')].join(NL), ctx);
-  vm.runInContext(SAD_CONSTS.map(function (v) { return extractVar(G16, v); }).join(NL), ctx);
+  vm.runInContext(SAD_CONSTS.map(function (v) { return extractVar(g16Src || G16, v); }).join(NL), ctx);
   vm.runInContext('var SHIPPING_ALLOCATION_DRAFT_LINES_HEADERS_FULL_ = '
     + 'SHIPPING_ALLOCATION_DRAFT_LINES_HEADERS_.concat(SAD_LINE_ETA_TAIL_COLUMNS_);', ctx);
-  vm.runInContext(SAD_FNS.map(function (f) { return extractFn(G16, f); }).join(NL), ctx);
+  var _G16 = g16Src || G16;
+  vm.runInContext(SAD_FNS.map(function (f) { return extractFn(_G16, f); }).join(NL), ctx);
   sb.__tally = function (payload) { calls.writer++; calls.payloads.push(payload); };
   vm.runInContext([
     'var __realAtomic = handleUpsertShippingAllocationDraftAtomic_;',
@@ -284,6 +288,15 @@ World.prototype.run = function (entry) {
   var res = null, threw = null;
   try { res = vm.runInContext(entry + '()', this.ctx); } catch (e) { threw = e; }
   return { res: res || {}, threw: threw };
+};
+// A raw call into the writer, for the cases where the payload IS the thing under test.
+World.prototype.write = function (body) {
+  var out = null, threw = null;
+  try { out = vm.runInContext('handleUpsertShippingAllocationDraftAtomic_(' + JSON.stringify(body) + ')', this.ctx); }
+  catch (e) { threw = e; }
+  var parsed = null;
+  try { parsed = JSON.parse(out && out.getContent ? out.getContent() : JSON.stringify(out || {})); } catch (e2) {}
+  return { parsed: parsed, threw: threw };
 };
 World.prototype.dbWrites = function () { return this.H.writes + this.L.writes; };
 World.prototype.rowsOf = function (tab) {
@@ -303,7 +316,10 @@ World.prototype.k4 = function (id) { return vm.runInContext('ricK4GroupKey_(' + 
 // consumes, and the shape a single-route Execution Plan Save produces. `expected_arrival` is deliberately
 // absent from the line: sadRegenerateLinePatch_ adopts an incoming ETA only when non-blank, so omitting it is
 // what keeps 'the Save does not touch the ETA' true rather than merely intended.
-World.prototype.save = function (headerId, lineId, lastMile, actor) {
+// R6-R6-R4-R2 — THE PAYLOAD DECLARES WHAT IT READ. `expected` defaults to the row's CURRENT version,
+// which is what a correctly-hydrated page sends; pass null to reproduce the defect this round found, or a
+// wrong number to reproduce a genuinely stale page.
+World.prototype.save = function (headerId, lineId, lastMile, actor, expected) {
   var h = this.header(headerId), l = this.line(lineId);
   var payload = {
     intent: 'UPDATE_EXISTING_ROUTE',
@@ -318,12 +334,12 @@ World.prototype.save = function (headerId, lineId, lastMile, actor) {
       recommended_shipping_method: h.recommended_shipping_method,
       destination_marketplace: h.destination_marketplace,
       recommended_last_mile_delivery: lastMile,
-      expected_draft_version: String(h.draft_version),
       created_by: actor || PAGE_ACTOR
     },
-    lines: [{ allocation_draft_line_id: lineId, sku: l.sku, planned_qty: String(l.planned_qty) }],
-    expected_draft_version: String(h.draft_version)
+    lines: [{ allocation_draft_line_id: lineId, sku: l.sku, planned_qty: String(l.planned_qty) }]
   };
+  var _exp = (expected === undefined) ? String(h.draft_version) : expected;
+  if (_exp !== null) { payload.header.expected_draft_version = _exp; payload.expected_draft_version = _exp; }
   var out = null, threw = null;
   try { out = vm.runInContext('handleUpsertShippingAllocationDraftAtomic_(' + JSON.stringify(payload) + ')', this.ctx); }
   catch (e) { threw = e; }
@@ -343,7 +359,7 @@ var w0 = new World();
 var rd0 = w0.run('RUN_R6R6R4_SINGLE_ROW_SAVE_READINESS');
 ok(!rd0.threw, 'H1  the readiness runs against the real census' + (rd0.threw ? ' — ' + rd0.threw.message : ''));
 eq(w0.dbWrites(), 0, 'H2  and the fixture plus a readiness touched no cell');
-eq(w0.k4(A_HEADER), K4_A_TRUCK, 'H3  69_ derives Route A\'s CURRENT key from the row — truck');
+eq(w0.k4(A_HEADER), K4_A_PARCEL, 'H3  69_ derives Route A\'s CURRENT key from the row — parcel, after stage one');
 eq(w0.k4(B_HEADER), K4_B_BLANK, 'H3a and Route B\'s as the blank-last-mile key the compensation restored');
 ok(!/k4_group_key/.test(G16), 'H3b there is still no k4_group_key column: the key is derived, never stored');
 // The line table has no updated_by, which is why §6's actor gate is a HEADER gate and says so.
@@ -444,7 +460,7 @@ eq(Object.keys(RD.route_b_observed), FIELDS,
 eq(Object.keys(RD.route_a_observed), FIELDS, 'F1a and the observed Route A row over the same list');
 eq(RD.route_b_frozen.updated_at, TS_COMPENSATED, 'F1b beside the FROZEN record it was compared against');
 eq(RD.route_b_observed.updated_at, TS_COMPENSATED, 'F1c so a future gap can be closed from this output alone');
-eq(RD.route_a_frozen.draft_version, '2', 'F1d Route A frozen at the version the Save will guard against');
+eq(RD.route_a_frozen.draft_version, '3', 'F1d Route A frozen at the version the Save will guard against');
 ['verdict', 'predicates_passed', 'predicates_failed', 'snapshot_gaps', 'db_writes', 'writer_calls',
  'route_a_frozen', 'route_a_observed', 'route_b_frozen', 'route_b_observed'].forEach(function (k) {
   ok(Object.prototype.hasOwnProperty.call(RD, k), 'F2-' + k + ' is in the readiness output');
@@ -457,7 +473,7 @@ var exp = JSON.parse(expLine[0].slice(expLine[0].indexOf('{')));
 eq([exp.verdict, exp.predicates_failed, exp.snapshot_gaps, exp.db_writes, exp.writer_calls],
   ['SINGLE_ROW_SAVE_READY', 0, [], 0, 0], 'F3a carrying the verdict, the counts, the gaps and the zeroes');
 eq(exp.route_b_observed.updated_at, TS_COMPENSATED, 'F3b and both rows, field by field');
-eq(exp.route_a_observed.last_mile_delivery, 'truck', 'F3c including Route A');
+eq(exp.route_a_observed.last_mile_delivery, 'parcel', 'F3c including Route A');
 ok(exp.predicates === undefined, 'F3d and NOT the sixty predicate rows — failures are logged one by one');
 // The wrapper this replaces took no arguments and read nothing a console could aim; neither does this.
 ok(!/RUN_R6R6R4_READINESS_FULL_EXPORT/.test(CENSUS),
@@ -548,8 +564,8 @@ eq([rSplit.verdict, has(rSplit, 'route_b_header_and_line_instants_agree')], ['ST
 // ================================================================================================================
 section('§8c — ROUTE A DRIFT AND THE ALREADY-SAVED CASE');
 // ================================================================================================================
-[['aHeader', { recommended_last_mile_delivery: 'parcel' }, 'route_a_last_mile_delivery_unchanged'],
- ['aHeader', { draft_version: '3' }, 'route_a_draft_version_unchanged'],
+[['aHeader', { recommended_last_mile_delivery: 'truck' }, 'route_a_last_mile_delivery_unchanged'],
+ ['aHeader', { draft_version: '4' }, 'route_a_draft_version_unchanged'],
  ['aHeader', { updated_by: REPAIR_ACTOR }, 'route_a_updated_by_unchanged'],
  ['aHeader', { recommended_shipping_method: 'air' }, 'route_a_shipping_method_unchanged'],
  ['aLine', { planned_qty: '321' }, 'route_a_quantity_unchanged'],
@@ -562,10 +578,10 @@ section('§8c — ROUTE A DRIFT AND THE ALREADY-SAVED CASE');
     'A' + (i + 1) + '  Route A drift in ' + c[2] + ' STOPs and writes nothing');
 });
 // ALREADY SAVED is recognisable on its own, so nobody performs the edit a second time.
-var wDone = new World({ aHeader: { recommended_last_mile_delivery: 'parcel', draft_version: '3',
+var wDone = new World({ aHeader: { recommended_last_mile_delivery: 'truck', draft_version: '4',
   updated_at: TS_SAVE }, aLine: { updated_at: TS_SAVE } });
 var rDone = wDone.run('RUN_R6R6R4_SINGLE_ROW_SAVE_READINESS').res;
-eq(rDone.already_saved, true, 'A7  a row already at parcel/version 3 is reported as ALREADY SAVED');
+eq(rDone.already_saved, true, 'A7  a row already at truck/version 4 is reported as ALREADY SAVED');
 eq(rDone.verdict, 'STOP', 'A7a it is not a success — the readiness has nothing left to authorize');
 ok(rDone.stop_reason.indexOf('ALREADY') !== -1 && rDone.stop_reason.indexOf('READBACK') !== -1,
   'A7b and the reason says so in words, and sends the operator to the readback rather than the edit');
@@ -600,13 +616,13 @@ var w = new World();
 var before = w.snapshot();
 var beforeA = w.header(A_HEADER), beforeAL = w.line(A_LINE);
 var frozenB = JSON.stringify(w.header(B_HEADER)), frozenBL = JSON.stringify(w.line(B_LINE));
-var sv = w.save(A_HEADER, A_LINE, 'parcel');
+var sv = w.save(A_HEADER, A_LINE, 'truck');
 ok(!sv.threw, 'S1  the real 16_ writer accepts the single-route UPDATE' + (sv.threw ? ' — ' + sv.threw.message : ''));
 eq(sv.parsed && sv.parsed.success, true, 'S1a and answers success');
 eq(w.calls.writer, 1, 'S1b exactly ONE mutation request — the page chains one per canonical group');
 eq(sv.payload.lines.length, 1, 'S1c carrying exactly one line');
 eq(sv.payload.lines[0].allocation_draft_line_id, A_LINE, 'S1d which is Route A\'s');
-eq(sv.payload.header.expected_draft_version, '2', 'S1e guarded by the version that was read');
+eq(sv.payload.header.expected_draft_version, '3', 'S1e guarded by the version that was read');
 eq(sv.payload.create_idempotency_key, undefined, 'S1f and with NO create_idempotency_key — an UPDATE mints nothing');
 ok(JSON.stringify(sv.payload).indexOf(B_HEADER) === -1 && JSON.stringify(sv.payload).indexOf(B_LINE) === -1,
   'S1g Route B\'s identifiers appear nowhere in the payload');
@@ -620,7 +636,7 @@ var movedL = Object.keys(afterAL).filter(function (k) { return String(afterAL[k]
 eq(movedH, ['draft_version', 'recommended_last_mile_delivery', 'updated_at'],
   'S2  on Route A\'s header exactly three columns moved: the one edited, the version, the stamp');
 eq(movedL, ['updated_at'], 'S2a and on its line, only the stamp');
-eq(w.k4(A_HEADER), K4_A_PARCEL, 'S2b the derived K4 followed the last mile, having been written nowhere');
+eq(w.k4(A_HEADER), K4_A_TRUCK, 'S2b the derived K4 followed the last mile, having been written nowhere');
 eq(JSON.stringify(w.header(B_HEADER)), frozenB, 'S3  Route B\'s header is BYTE-IDENTICAL');
 eq(JSON.stringify(w.line(B_LINE)), frozenBL, 'S3a and so is its line');
 eq(w.rowsOf('shipping_allocation_drafts').length, 2, 'S3b two headers, as before');
@@ -631,8 +647,8 @@ eq(RB.verdict, 'SINGLE_ROW_MUTATION_CONFIRMED', 'S4  the readback returns the ON
 eq(RB.predicates_failed, 0, 'S4a with zero failed predicates');
 ok(RB.predicates_passed >= 35, 'S4b and ' + RB.predicates_passed + ' passed');
 eq([RB.read_only, RB.db_writes, RB.writer_constructed], [true, 0, false], 'S4c and it wrote nothing itself');
-eq(RB.k4_expected_after, K4_A_PARCEL, 'S5  the expected key was DERIVED by substituting one segment');
-eq(RB.k4_actual_after, K4_A_PARCEL, 'S5a and production agrees');
+eq(RB.k4_expected_after, K4_A_TRUCK, 'S5  the expected key was DERIVED by substituting one segment');
+eq(RB.k4_actual_after, K4_A_TRUCK, 'S5a and production agrees');
 ok(RB.ui_note.indexOf('displayed') !== -1 || RB.ui_note.indexOf('DISPLAY') !== -1,
   'S6  and the verdict states that a displayed last mile is not a stored one');
 eq(RB.stage_two_authorized, false, 'S6a stage two is still not authorized by a confirmed stage one');
@@ -643,31 +659,31 @@ section('§8e — THE READBACK CATCHES EVERY WAY THE SAVE COULD GO WRONG');
 // The version did not move: the write never landed.
 var wNo = new World();
 wNo.run('RUN_R6R6R4_SINGLE_ROW_SAVE_READINESS');
-var wNoH = new World({ aHeader: { recommended_last_mile_delivery: 'parcel', updated_at: TS_SAVE },
+var wNoH = new World({ aHeader: { recommended_last_mile_delivery: 'truck', updated_at: TS_SAVE },
   aLine: { updated_at: TS_SAVE } });
 var rNoV = wNoH.run('RUN_R6R6R4_SINGLE_ROW_SAVE_READBACK').res;
 eq([rNoV.verdict, has(rNoV, 'route_a_draft_version_advanced_by_exactly_one')], ['STOP', true],
   'E1  a last mile that changed with NO version step STOPs — nothing was persisted through the writer');
 // The version jumped two: something wrote twice.
-var wTwo = new World({ aHeader: { recommended_last_mile_delivery: 'parcel', draft_version: '4', updated_at: TS_SAVE },
+var wTwo = new World({ aHeader: { recommended_last_mile_delivery: 'truck', draft_version: '5', updated_at: TS_SAVE },
   aLine: { updated_at: TS_SAVE } });
 var rTwo = wTwo.run('RUN_R6R6R4_SINGLE_ROW_SAVE_READBACK').res;
 eq([rTwo.verdict, has(rTwo, 'route_a_draft_version_advanced_by_exactly_one')], ['STOP', true],
   'E2  and a version that jumped TWO STOPs — one edit is one step');
 // The K4 moved on more than the last-mile segment.
-var wK4 = new World({ aHeader: { recommended_last_mile_delivery: 'parcel', draft_version: '3',
+var wK4 = new World({ aHeader: { recommended_last_mile_delivery: 'truck', draft_version: '4',
   recommended_shipping_method: 'air', updated_at: TS_SAVE }, aLine: { updated_at: TS_SAVE } });
 var rK4 = wK4.run('RUN_R6R6R4_SINGLE_ROW_SAVE_READBACK').res;
 eq([rK4.verdict, has(rK4, 'route_a_k4_is_the_frozen_key_with_only_the_last_mile_segment_replaced')], ['STOP', true],
   'E3  a key that moved on a SECOND dimension STOPs — the substitution is exact or it is not one');
 ok(has(rK4, 'route_a_shipping_method_unchanged'), 'E3a and the dimension that moved is named too');
 // The stamps did not advance.
-var wStamp = new World({ aHeader: { recommended_last_mile_delivery: 'parcel', draft_version: '3' } });
+var wStamp = new World({ aHeader: { recommended_last_mile_delivery: 'truck', draft_version: '4' } });
 var rStamp = wStamp.run('RUN_R6R6R4_SINGLE_ROW_SAVE_READBACK').res;
 eq([rStamp.verdict, has(rStamp, 'route_a_updated_at_advanced')], ['STOP', true],
   'E4  a version that moved without a stamp STOPs — a landed write leaves both');
 // The actor is wrong: something other than the page wrote it.
-var wActor = new World({ aHeader: { recommended_last_mile_delivery: 'parcel', draft_version: '3',
+var wActor = new World({ aHeader: { recommended_last_mile_delivery: 'truck', draft_version: '4',
   updated_at: TS_SAVE, updated_by: REPAIR_ACTOR }, aLine: { updated_at: TS_SAVE } });
 var rActor = wActor.run('RUN_R6R6R4_SINGLE_ROW_SAVE_READBACK').res;
 eq([rActor.verdict, has(rActor, 'route_a_updated_by_is_the_page')], ['STOP', true],
@@ -676,7 +692,7 @@ eq([rActor.verdict, has(rActor, 'route_a_updated_by_is_the_page')], ['STOP', tru
 // bystander something wrote, whatever else still looks right. Each field on its own.
 [['bHeader', 'updated_at', 'route_b_updated_at_unchanged'],
  ['bLine', 'updated_at', 'route_b_line_updated_at_unchanged']].forEach(function (c, i) {
-  var over = { aHeader: { recommended_last_mile_delivery: 'parcel', draft_version: '3', updated_at: TS_SAVE },
+  var over = { aHeader: { recommended_last_mile_delivery: 'truck', draft_version: '4', updated_at: TS_SAVE },
     aLine: { updated_at: TS_SAVE } };
   over[c[0]] = over[c[0]] || {}; over[c[0]][c[1]] = TS_ONE_SECOND_LATER;
   var w2 = new World(over);
@@ -692,7 +708,7 @@ ok(!has(RB, 'route_b_updated_at_unchanged') && !has(RB, 'route_b_line_updated_at
 // ROUTE A's are ALLOWED to advance, and did. The asymmetry is the whole point: one row is being changed.
 ok(!has(RB, 'route_a_updated_at_advanced') && !has(RB, 'route_a_line_updated_at_advanced'),
   'E7  the two Route A stamps ADVANCED, and that is what a landed write looks like');
-ok(String(w.header(A_HEADER).updated_at) !== TS_A && String(w.line(A_LINE).updated_at) !== TS_A,
+ok(String(w.header(A_HEADER).updated_at) !== TS_A_NOW && String(w.line(A_LINE).updated_at) !== TS_A_NOW,
   'E7a measured on the rows, not inferred from the verdict');
 
 // ================================================================================================================
@@ -700,7 +716,7 @@ section('§5/§8 — A PAYLOAD THAT MIXES IN ROUTE B, AND A FALLBACK THAT EXPAND
 // ================================================================================================================
 // The incident, reproduced exactly: two sequential atomic requests, one per canonical group.
 var wMix = new World();
-wMix.save(A_HEADER, A_LINE, 'parcel');
+wMix.save(A_HEADER, A_LINE, 'truck');
 wMix.save(B_HEADER, B_LINE, 'parcel');
 eq(wMix.calls.writer, 2, 'X1  the incident shape is TWO writer calls, one per group — never one payload of two');
 eq(String(wMix.header(B_HEADER).recommended_last_mile_delivery), 'parcel', 'X1a and Route B was written');
@@ -722,7 +738,7 @@ ok(!has(RB, 'route_b_updated_at_predates_the_route_a_save'),
 // A fallback that expanded to every visible row is the same two writes with a different cause, and the
 // readback cannot and must not tell them apart: it reports what moved.
 var wAll = new World();
-[[A_HEADER, A_LINE], [B_HEADER, B_LINE]].forEach(function (p) { wAll.save(p[0], p[1], 'parcel'); });
+[[A_HEADER, A_LINE, 'truck'], [B_HEADER, B_LINE, 'parcel']].forEach(function (p) { wAll.save(p[0], p[1], p[2]); });
 eq(wAll.calls.writer, 2, 'X4  an expanded fallback produces the same two calls');
 eq(wAll.run('RUN_R6R6R4_SINGLE_ROW_SAVE_READBACK').res.verdict, 'STOP', 'X4a and the same refusal');
 // A payload that MINTS instead of updating.
@@ -746,12 +762,12 @@ section('§5 — THE BROWSER MUTATION AUDIT');
 var shape = new Function('return ' + extractFn(DBAPI, '_kmMutationShape_') + NL + ';_kmMutationShape_')();
 var one = shape('upsertShippingAllocationDraftAtomic', {
   intent: 'UPDATE_EXISTING_ROUTE',
-  header: { allocation_draft_id: A_HEADER, recommended_last_mile_delivery: 'parcel',
-    expected_draft_version: '2', note: 'a private operator note' },
+  header: { allocation_draft_id: A_HEADER, recommended_last_mile_delivery: 'truck',
+    expected_draft_version: '3', note: 'a private operator note' },
   lines: [{ allocation_draft_line_id: A_LINE, sku: SKU, planned_qty: 320 }]
 });
 eq(one.intent, 'UPDATE_EXISTING_ROUTE', 'M1  the audit reports the INTENT, which it could not before');
-eq(one.expected_draft_version, '2', 'M1a and the version the request is guarded by');
+eq(one.expected_draft_version, '3', 'M1a and the version the request is guarded by');
 eq(one.has_create_idempotency_key, false, 'M1b and that no idempotency key is present');
 eq(one.mints_new_row, false, 'M1c and that nothing would be minted');
 eq(one.routes_in_payload, 1, 'M1d one route');
@@ -787,11 +803,11 @@ var tp = transportFactory().create();
 tp.recordExternal({ action: 'upsertShippingAllocationDraftAtomic', kind: 'write', ms: 3100,
   routes_in_payload: 1, allocation_draft_id: A_HEADER, allocation_draft_line_ids: [A_LINE],
   changed_fields: ['recommended_last_mile_delivery'], intent: 'UPDATE_EXISTING_ROUTE',
-  expected_draft_version: '2', has_create_idempotency_key: false, mints_new_row: false,
+  expected_draft_version: '3', has_create_idempotency_key: false, mints_new_row: false,
   outcome: 'ANSWERED', request_id: 'REQ-W000001-C' });
 var tl = tp.timeline();
 eq(tl.mutation_requests, 1, 'M5  the transport records ONE mutation request');
-eq([tl.mutations[0].intent, tl.mutations[0].expected_draft_version], ['UPDATE_EXISTING_ROUTE', '2'],
+eq([tl.mutations[0].intent, tl.mutations[0].expected_draft_version], ['UPDATE_EXISTING_ROUTE', '3'],
   'M5a carrying the intent and the guarded version out to the timeline');
 eq([tl.mutations[0].has_create_idempotency_key, tl.mutations[0].mints_new_row], [false, false],
   'M5b and both booleans');
@@ -834,8 +850,14 @@ eq(ST.expected.route_a_k4_after, K4_A_TRUCK, 'T2b landing back on the truck key'
 ok(ST.readiness_design.success_verdict === 'SINGLE_ROW_SAVE_READY'
   && ST.readback_design.success_verdict === 'SINGLE_ROW_MUTATION_CONFIRMED',
   'T3  the two designs reuse this round\'s verdicts rather than inventing a second vocabulary');
-ok(ST.precondition.indexOf('SINGLE_ROW_MUTATION_CONFIRMED') !== -1,
-  'T3a and stage one must be CONFIRMED before stage two has a starting point');
+ok(ST.precondition.indexOf('SINGLE_ROW_SAVE_READY') !== -1
+  && ST.precondition.indexOf('R6-R6-R4-R2 fix is DEPLOYED') !== -1
+  && ST.precondition.indexOf('expected_draft_version') !== -1,
+  'T3a and stage two needs all three: the readiness, the deployed fix, and an audit showing the token');
+eq(ST.requires_optimistic_token, '3', 'T3b the token stage two must declare is the version stage one left');
+eq(ST.expected.route_a_expected_draft_version_sent, '3', 'T3c stated in the expected block as well');
+ok(/MUTATION_CONTRACT_DEFECT/.test(ST.root_cause_fix),
+  'T3d and the manifest records the classification, so nobody re-derives it from the version alone');
 // The manifest cannot write, and neither can the two verdicts.
 var R4SEC = CENSUS.slice(CENSUS.indexOf('R6-R6-R4 — THE POST-REPAIR SINGLE-ROW SAVE'));
 ok(!/handleUpsertShippingAllocationDraftAtomic_\s*\(/.test(R4SEC),
@@ -845,6 +867,152 @@ ok(!/\.setValue\(|\.appendRow\(|\.deleteRow\(|\.clearContent\(/.test(R4SEC),
 eq((CENSUS.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/[^\n]*/g, '$1 ')
   .match(/handleUpsertShippingAllocationDraftAtomic_\s*\(/g) || []).length, 1,
   'T4b the census still contains EXACTLY ONE writer call, and it is R6-R6-R3\'s');
+
+// ================================================================================================================
+section('R4-R2 — THE OPTIMISTIC TOKEN: WHY IT WAS null, AND THE TWO SIDES THAT LET IT BE');
+// ================================================================================================================
+// CLASSIFICATION: MUTATION_CONTRACT_DEFECT, not a telemetry one. The audit reported null because the field was
+// genuinely absent, and that is provable from the audit itself: `intent` came back UPDATE_EXISTING_ROUTE, and
+// intent lives ONLY on payload.header (buildDraftHeaderPayload sets it there; the atomic body has no
+// top-level intent). So the extractor resolved `header` correctly and found no version on it.
+var COMPAT = read('assets/js/utils/inventory-compat.js');
+var buildHeader = new Function('return ' + extractFn(COMPAT, 'buildDraftHeaderPayload') + NL + ';buildDraftHeaderPayload')();
+function storedVersion(model, id) {
+  return new Function('replenAllocationDraft',
+    'return ' + extractFn(PAGE, '_irStoredDraftVersion_') + NL + ';_irStoredDraftVersion_')(model)(id);
+}
+// The atomic body the page builds, assembled here exactly as _flushDraftDbPersist assembles it.
+function uiBody(model) {
+  var ids = [A_HEADER];
+  var header = buildHeader({ intent: 'UPDATE_EXISTING_ROUTE', allocation_draft_id: ids[0],
+    expected_draft_version: storedVersion(model, ids[0]) || undefined,
+    company: 'ResUS', country: 'US', marketplace: 'Amazon',
+    source_warehouse_id: 'WH-TW-CN-FACTORY-YOUXIN', destination_marketplace: 'Amazon',
+    shipping_method: 'sea_express', last_mile_delivery: 'truck' });
+  return { header: header, lines: [{ allocation_draft_line_id: A_LINE, sku: SKU, planned_qty: '320' }],
+    create_idempotency_key: header.create_idempotency_key || undefined,
+    expected_draft_version: header.expected_draft_version || undefined };
+}
+var MODEL_OK = { bySku: {} }; MODEL_OK.bySku[SKU] = [{ allocation_draft_id: A_HEADER, draft_version: '3' }];
+var MODEL_LOST = { bySku: {} }; MODEL_LOST.bySku[SKU] = [{ allocation_draft_id: A_HEADER }];
+
+// ---- the intent proves the extractor found the header, which is what rules out A ------------------------------
+var shapeLost = shape('upsertShippingAllocationDraftAtomic', uiBody(MODEL_LOST));
+eq([shapeLost.intent, shapeLost.expected_draft_version], ['UPDATE_EXISTING_ROUTE', null],
+  'V1  the production audit is REPRODUCED: intent present, expected_draft_version null');
+eq(storedVersion(MODEL_LOST, A_HEADER), '',
+  'V1a because the model row carried no draft_version, so _irStoredDraftVersion_ returned blank');
+eq(uiBody(MODEL_LOST).header.expected_draft_version, undefined,
+  'V1b and buildDraftHeaderPayload omits a blank rather than sending an empty string');
+eq(uiBody(MODEL_LOST).expected_draft_version, undefined, 'V1c so the top-level copy is absent too');
+ok(/intent/.test(String(buildHeader)) && !/p.intent = ctx.expected/.test(String(buildHeader)),
+  'V1d intent is set on the HEADER, which is the field path that proves the extractor was not at fault');
+
+// ---- with the version present, the exact UI payload declares it ----------------------------------------------
+eq(storedVersion(MODEL_OK, A_HEADER), '3', 'V2  a model row that carries draft_version yields it');
+var bodyOk = uiBody(MODEL_OK);
+eq(bodyOk.header.expected_draft_version, '3', 'V2a the header declares the version that was read');
+eq(bodyOk.expected_draft_version, '3', 'V2b and so does the documented top-level field');
+eq(bodyOk.header.intent, 'UPDATE_EXISTING_ROUTE', 'V2c beside the intent it belongs to');
+var shapeOk = shape('upsertShippingAllocationDraftAtomic', bodyOk);
+eq([shapeOk.intent, shapeOk.expected_draft_version, shapeOk.mints_new_row, shapeOk.has_create_idempotency_key],
+  ['UPDATE_EXISTING_ROUTE', '3', false, false],
+  'V2d and the audit reports "3" — read from the request, never reconstructed from the AFTER version');
+
+// ---- THE PAGE-SIDE FIX: the version survives the DOM round trip ------------------------------------------------
+// The collector REPLACES replenAllocationDraft.bySku[sku] with rows it rebuilds from the DOM, so a field the
+// rebuilt literal does not carry is destroyed by the first edit — which is the event that schedules the write.
+ok(/replenAllocationDraft\.bySku\[sku\] = rows;/.test(PAGE),
+  'V3  the collector still REPLACES the model with what it rebuilds, which is why the row must carry it');
+ok(/var boundDraftVersion = rowEl\.getAttribute\('data-draft-version'\) \|\|/.test(PAGE),
+  'V3a it reads the version from the DOM, like every other identity field');
+ok(/String\(\(_priorRow && _priorRow\.draft_version\) \|\| ''\);/.test(PAGE),
+  'V3b falling back to the row the model already had');
+ok(/draft_version: boundDraftVersion,/.test(PAGE), 'V3c and the rebuilt row CARRIES it');
+ok(/if \(boundDraftVersion\) rowEl\.setAttribute\('data-draft-version', boundDraftVersion\);/.test(PAGE),
+  'V3d re-published to the DOM, so model and DOM cannot disagree');
+ok(/if \(route && route\.draft_version\) row\.setAttribute\('data-draft-version', String\(route\.draft_version\)\);/.test(PAGE),
+  'V3e the render stamps it beside the identity it belongs to');
+ok(/if \(ver\) els\[i\]\.setAttribute\('data-draft-version', ver\);/.test(PAGE),
+  'V3f and the post-save re-stamp adopts the version the server just wrote');
+// The hydrate has always read it; that was never the broken half.
+ok(/draft_version: hstr\('draft_version', 'draftVersion'\),/.test(PAGE),
+  'V3g the hydrate reads it from the stored header, as it always did');
+
+// ---- THE WRITER-SIDE FIX: a declared UPDATE must declare what it expects ----------------------------------------
+function attempt(over, body) {
+  var w2 = new World(over || {});
+  var out = null, threw = null;
+  try { out = vm.runInContext('handleUpsertShippingAllocationDraftAtomic_(' + JSON.stringify(body) + ')', w2.ctx); }
+  catch (e) { threw = e; }
+  var parsed = null;
+  try { parsed = JSON.parse(out && out.getContent ? out.getContent() : JSON.stringify(out || {})); } catch (e2) {}
+  return { w: w2, parsed: parsed, threw: threw };
+}
+function updateBody(expectedHeader, expectedTop, lastMile) {
+  var b = { intent: 'UPDATE_EXISTING_ROUTE',
+    header: { allocation_draft_id: A_HEADER, company: 'ResUS', country: 'US', marketplace: 'Amazon',
+      status: 'draft', recommended_source_warehouse_id: 'WH-TW-CN-FACTORY-YOUXIN',
+      recommended_source_warehouse_code_snapshot: 'CNYOUXIN', destination_marketplace: 'Amazon',
+      recommended_shipping_method: 'sea_express',
+      recommended_last_mile_delivery: (lastMile === undefined ? 'truck' : lastMile),
+      created_by: PAGE_ACTOR },
+    lines: [{ allocation_draft_line_id: A_LINE, sku: SKU, planned_qty: '320' }] };
+  if (expectedHeader !== null) b.header.expected_draft_version = expectedHeader;
+  if (expectedTop !== null) b.expected_draft_version = expectedTop;
+  return b;
+}
+var noTok = attempt({}, updateBody(null, null));
+eq(noTok.parsed && noTok.parsed.code, 'MISSING_OPTIMISTIC_TOKEN',
+  'V4  an UPDATE_EXISTING_ROUTE with NO expected_draft_version is REFUSED');
+eq([noTok.parsed.success, noTok.parsed.zero_write], [false, true], 'V4a as a proven zero write');
+eq(noTok.w.dbWrites(), 0, 'V4b measured on the sheet: not one cell');
+eq([String(noTok.w.header(A_HEADER).recommended_last_mile_delivery), String(noTok.w.header(A_HEADER).draft_version)],
+  ['parcel', '3'], 'V4c the row is exactly where it was — this is the write that used to commit anyway');
+eq(String(noTok.parsed.data.current_draft_version), '3',
+  'V4d and the refusal publishes the CURRENT version, so the client can adopt it instead of guessing');
+ok(/Reload the Execution Plan/.test(String(noTok.parsed.error)),
+  'V4e with an operator sentence, because the only way to reach this is an out-of-date page');
+ok(/zero rows written/.test(String(noTok.parsed.error)),
+  'V4f and the phrase _kmZeroWriteProven_ reads, so the client states zero-write rather than guessing');
+// NOT REPAIRED BY FILLING IT IN. The refusal must not adopt the row's own version and proceed.
+var blank = attempt({}, updateBody('', ''));
+eq(blank.parsed && blank.parsed.code, 'MISSING_OPTIMISTIC_TOKEN',
+  'V5  a BLANK expected version is absent, not the number zero, and is refused the same way');
+eq(blank.w.dbWrites(), 0, 'V5a writing nothing');
+var stale = attempt({}, updateBody('2', '2'));
+eq(stale.parsed && stale.parsed.code, 'STALE_OPTIMISTIC_TOKEN',
+  'V6  a STALE expected version is refused, as it always was');
+eq([stale.parsed.zero_write, stale.w.dbWrites()], [true, 0], 'V6a zero write, measured');
+eq([String(stale.parsed.data.expected), String(stale.parsed.data.current)], ['2', '3'], 'V6b naming both numbers');
+// THE DOCUMENTED TOP-LEVEL FIELD IS NOW READ. §1611 documents it and the guard used to ignore it.
+var topOnly = attempt({}, updateBody(null, '3'));
+eq(topOnly.parsed && topOnly.parsed.success, true,
+  'V7  a body-level expected_draft_version alone is HONOURED — the documented shape now works');
+eq(String(topOnly.w.header(A_HEADER).draft_version), '4', 'V7a and the write lands, exactly one step');
+var topStale = attempt({}, updateBody(null, '2'));
+eq(topStale.parsed && topStale.parsed.code, 'STALE_OPTIMISTIC_TOKEN',
+  'V7b and a stale one there is refused, which it was not before');
+eq(topStale.w.dbWrites(), 0, 'V7c zero write');
+// A CREATE has no prior version, and a cancel carries no route intent. Neither is caught by the new gate.
+var created = attempt({}, { intent: 'CREATE_NEW_ROUTE',
+  header: { company: 'ResUS', country: 'US', marketplace: 'Amazon', status: 'draft',
+    recommended_source_warehouse_id: 'WH-TW-CN-FACTORY-YOUXIN',
+    recommended_source_warehouse_code_snapshot: 'CNYOUXIN', destination_marketplace: 'Amazon',
+    recommended_shipping_method: 'air', recommended_last_mile_delivery: 'truck', created_by: PAGE_ACTOR },
+  lines: [{ sku: SKU, planned_qty: '10' }] });
+ok(!(created.parsed && created.parsed.code === 'MISSING_OPTIMISTIC_TOKEN'),
+  'V8  a CREATE_NEW_ROUTE is NOT caught by the new gate — it has no prior version to declare');
+ok(!/sadIntent === 'CREATE_NEW_ROUTE'/.test(G16.slice(G16.indexOf('MISSING_OPTIMISTIC_TOKEN') - 700,
+  G16.indexOf('MISSING_OPTIMISTIC_TOKEN'))),
+  'V8a the gate is keyed on UPDATE_EXISTING_ROUTE alone');
+ok(/sadIntent === 'UPDATE_EXISTING_ROUTE' && sadExpDeclared === null/.test(G16),
+  'V8b exactly that condition, and nothing wider');
+// AND THE ROW ISOLATION CONTRACT IS UNCHANGED: one route, one line, no mint, no idempotency key.
+var svR = w.calls.payloads[0];
+eq([svR.lines.length, svR.intent, svR.create_idempotency_key === undefined],
+  [1, 'UPDATE_EXISTING_ROUTE', true],
+  'V9  the authorized Save still carries one line, one intent and no create key');
 
 // ================================================================================================================
 section('§9 — RELEASE');
@@ -862,20 +1030,27 @@ ok(RO.BUILD_STAMP_RE.test(declared), 'Y1b and whatever it declares is a well-for
 eq(RO.ROUND_TOKENS.filter(function (t) { return /r6r6r4r1/i.test(t); }), [],
   'Y1c R6-R6-R4-R1 introduced NO cache token — it changed the diagnostic and its tests, nothing else');
 // A FRONTEND FILE CHANGED, so the shared token MUST have moved — the opposite of R6-R6-R3's claim.
-eq(RO.currentAppToken(), 'fc1be3r4a2r1r6r6r4-mutationaudit-20260906',
-  'Y2  the cache token MOVED, because two co-deployed frontend files changed');
+// R6-R6-R4-R2 — DERIVED. Pinning the literal made this an equality with now for the fourth time in this
+// family. The two claims are that the token this round introduced comes after the one it supersedes, and
+// that index.html carries ONE token throughout.
+ok(RO.ROUND_TOKENS.indexOf(RO.currentAppToken())
+   > RO.ROUND_TOKENS.indexOf('fc1be3r4a2r1r6r6r2-rowisolation-20260906'),
+  'Y2  the cache token MOVED past R6-R6-R2 — a frontend file changed and a published token is never reused');
+eq(RO.staleAppTokenRefs(INDEX), [], 'Y2-stale index.html carries no superseded token');
 ok(RO.ROUND_TOKENS.indexOf('fc1be3r4a2r1r6r6r2-rowisolation-20260906')
    < RO.ROUND_TOKENS.indexOf('fc1be3r4a2r1r6r6r4-mutationaudit-20260906'),
   'Y2a after the published one it may not reuse');
-var stale = (INDEX.match(/\?v=fc1be3r4a2r1r6r6r2-rowisolation-20260906/g) || []).length;
-eq(stale, 0, 'Y2b and index.html carries no copy of the superseded token');
-ok((INDEX.match(/\?v=fc1be3r4a2r1r6r6r4-mutationaudit-20260906/g) || []).length >= 20,
-  'Y2c every asset in the co-deployed set rotated together');
-ok(/km-transport\.js\?v=fc1be3r4a2r1r6r6r4/.test(INDEX) && /operation-system-db-api\.js\?v=fc1be3r4a2r1r6r6r4/.test(INDEX),
-  'Y2d the two files that actually changed among them');
+ok(RO.appTokenRefCount(INDEX) >= 20,
+  'Y2c every asset in the co-deployed set rotated together (' + RO.appTokenRefCount(INDEX) + ')');
+ok(INDEX.indexOf('inventory-replenishment.js?v=' + RO.currentAppToken()) !== -1,
+  'Y2d including inventory-replenishment.js, the file that actually changed this round');
 // NO SERVER CHANGE. The Save uses the shipped writer and the shipped router exactly as they are.
-ok(G16.indexOf('R6-R6-R4') === -1, 'Y3  16_ is untouched — no new deployment version is required for it');
-ok(G01.indexOf('R6-R6-R4') === -1, 'Y3a and so is the router: nothing new is reachable over HTTP');
+// R6-R6-R4-R2 — 16_ IS TOUCHED THIS ROUND, and saying otherwise would be the comfortable lie. The writer
+// now refuses an UPDATE that declares no expected version, so a NEW WEB APP DEPLOYMENT VERSION IS REQUIRED,
+// and the order matters: frontend first, Apps Script second, or a browser holding the old page is refused.
+ok(G16.indexOf('R6-R6-R4-R2') !== -1, 'Y3  16_ IS changed this round — a new deployment version is required');
+ok(G01.indexOf('R6-R6-R4') === -1, 'Y3a the router is not: nothing new is reachable over HTTP');
+ok(/MISSING_OPTIMISTIC_TOKEN/.test(G16), 'Y3b and the new refusal is typed');
 // THE FLAG AND THE ALLOWLIST.
 var CFG = read('assets/specs/active/apps-script/00_config.gs');
 ok(/var INVENTORY_AI_PLAN_DB_GENERATION_ENABLED_ = false;/.test(CFG), 'Y4  the AI Plan flag is still false');
@@ -952,9 +1127,11 @@ mut('N4  the K4 expectation derived from the row being checked instead of from t
     && has(rK4, 'route_a_k4_is_the_frozen_key_with_only_the_last_mile_segment_replaced');
 });
 mut('N5  the version gate accepting any advance instead of exactly one', function () {
-  var m = swap(CENSUS, "    a ? CENSUS_str_(a.draft_version) : null, !!a && CENSUS_str_(a.draft_version) === '3');",
-                       "    a ? CENSUS_str_(a.draft_version) : null, !!a && CENSUS_num_(a.draft_version) > 2);");
-  var r = withCensus(m, { aHeader: { recommended_last_mile_delivery: 'parcel', draft_version: '4', updated_at: TS_SAVE },
+  var m = swap(CENSUS, cr("    a ? CENSUS_str_(a.draft_version) : null,",
+    "    !!a && CENSUS_str_(a.draft_version) === R6R6R4_A_AFTER_DRAFT_VERSION_);"),
+    cr("    a ? CENSUS_str_(a.draft_version) : null,",
+    "    !!a && CENSUS_num_(a.draft_version) > CENSUS_num_(R6R6R4_A_BEFORE_.draft_version));"));
+  var r = withCensus(m, { aHeader: { recommended_last_mile_delivery: 'truck', draft_version: '5', updated_at: TS_SAVE },
     aLine: { updated_at: TS_SAVE } }).run('RUN_R6R6R4_SINGLE_ROW_SAVE_READBACK').res;
   return !has(r, 'route_a_draft_version_advanced_by_exactly_one') && has(rTwo, 'route_a_draft_version_advanced_by_exactly_one');
 });
@@ -962,7 +1139,7 @@ mut('N6  the predates-the-save comparison inverted so a written Route B passes',
   var m = swap(CENSUS, "      b ? CENSUS_str_(b[fld]) : null, bNow !== null && aNow !== null && bNow < aNow);",
                        "      b ? CENSUS_str_(b[fld]) : null, bNow !== null && aNow !== null);");
   var wm = withCensus(m);
-  wm.save(A_HEADER, A_LINE, 'parcel');
+  wm.save(A_HEADER, A_LINE, 'truck');
   wm.save(B_HEADER, B_LINE, 'parcel');
   var r = wm.run('RUN_R6R6R4_SINGLE_ROW_SAVE_READBACK').res;
   return !has(r, 'route_b_updated_at_predates_the_route_a_save')
@@ -1015,6 +1192,56 @@ mut('N12 the transport reading "not told" as "no"', function () {
     && tp2.timeline().mutations[0].has_create_idempotency_key === null;
 });
 
+mut('N14 the writer gate removed, so an UPDATE with no token commits again', function () {
+  // The exact defect this round found: the guard runs only when the field is PRESENT, and the version
+  // advances anyway — which is why a row at 3 was never evidence that the request had declared 2.
+  var m = swap(G16, "    if (sadIntent === 'UPDATE_EXISTING_ROUTE' && sadExpDeclared === null) {",
+    "    if (false) {");
+  var w2 = new World({}, null, m);
+  var r = w2.write(updateBody(null, null));
+  return r.parsed && r.parsed.success === true && String(w2.header(A_HEADER).draft_version) === '4'
+    && noTok.parsed.code === 'MISSING_OPTIMISTIC_TOKEN';
+});
+mut('N15 the missing token FILLED IN from the row instead of refused', function () {
+  // The repair that deletes the protection while appearing to add it: adopt the current version as the
+  // expectation and the check passes by construction, for every caller, for ever.
+  var m = swap(G16, "      : ((body && body.expected_draft_version != null",
+    "      : ((true");
+  m = swap(m, "        && String(body.expected_draft_version).trim() !== '') ? body.expected_draft_version : null);",
+    "        && true) ? priorVersion : null);");
+  var w2 = new World({}, null, m);
+  var r = w2.write(updateBody(null, null));
+  return r.parsed && r.parsed.success === true && noTok.parsed.code === 'MISSING_OPTIMISTIC_TOKEN';
+});
+mut('N16 the documented top-level expected_draft_version ignored again', function () {
+  var m = swap(G16, "      : ((body && body.expected_draft_version != null", "      : ((false");
+  var w2 = new World({}, null, m);
+  var r = w2.write(updateBody(null, '3'));
+  return r.parsed && r.parsed.code === 'MISSING_OPTIMISTIC_TOKEN' && topOnly.parsed.success === true;
+});
+mut('N17 the collected row dropping draft_version, exactly as it did in production', function () {
+  // Source-shaped, because the collector needs a whole page to run — but the CONSEQUENCE is measured: with
+  // the field gone the model has no version, the header omits the token, and the writer now refuses.
+  var m = swap(PAGE, '            draft_version: boundDraftVersion,', '');
+  return !/draft_version: boundDraftVersion,/.test(m) && /draft_version: boundDraftVersion,/.test(PAGE)
+    && attempt({}, uiBody(MODEL_LOST)).parsed.code === 'MISSING_OPTIMISTIC_TOKEN';
+});
+mut('N18 the audit reading the token from the body only, so a header-only request reports null', function () {
+  var src = extractFn(DBAPI, '_kmMutationShape_');
+  var m = swap(src, "        out.expected_draft_version = ((h && h.expected_draft_version) != null)",
+    "        out.expected_draft_version = (false)");
+  var fn = new Function('return ' + m + NL + ';_kmMutationShape_')();
+  var o = fn('x', { header: { expected_draft_version: '3' }, lines: [] });
+  return o.expected_draft_version === null && shapeOk.expected_draft_version === '3';
+});
+mut('N19 the audit reconstructing the token from the AFTER version instead of reading the request', function () {
+  var src = extractFn(DBAPI, '_kmMutationShape_');
+  var m = swap(src, "            : ((p.expected_draft_version != null) ? String(p.expected_draft_version) : null);",
+    "            : '3';");
+  var fn = new Function('return ' + m + NL + ';_kmMutationShape_')();
+  var o = fn('x', { header: {}, lines: [] });
+  return o.expected_draft_version === '3' && shapeLost.expected_draft_version === null;
+});
 console.log('\npassed ' + pass + '  failed ' + fail
   + '  |  mutants caught ' + neg.caught + '  survived ' + neg.missed);
 process.exit(fail ? 1 : 0);

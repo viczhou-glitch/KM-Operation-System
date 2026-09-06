@@ -1025,11 +1025,22 @@ await (async function () {
   });
 
   // I14 — a stale version is ignored instead of refusing.
+  // R6-R6-R4-R2 — the guard this pointed at was rewritten: it now reads the header FIRST and the
+  // documented top-level field second, and a DECLARED UPDATE that supplies neither is refused rather than
+  // waved through. The property I14 owns is unchanged — a stale token must refuse — so it is re-aimed,
+  // and the round's own suite carries the missing-token half.
   await amut('I14  ignoring the optimistic token', async function () {
-    var mutated = G16.replace('if (header.expected_draft_version != null && sadFpVal_(header.expected_draft_version) !== priorVersion) {',
+    var mutated = G16.replace('if (sadExpDeclared != null && sadFpVal_(sadExpDeclared) !== priorVersion) {',
                               'if (false) {');
     if (mutated === G16) throw new Error('mutation target absent');
-    return !/if \(header\.expected_draft_version != null && sadFpVal_\(header\.expected_draft_version\) !== priorVersion\) \{/.test(mutated);
+    return !/if \(sadExpDeclared != null && sadFpVal_\(sadExpDeclared\) !== priorVersion\) \{/.test(mutated);
+  });
+  await amut('I14a accepting an UPDATE that declares no optimistic token at all', async function () {
+    var mutated = G16.replace("if (sadIntent === 'UPDATE_EXISTING_ROUTE' && sadExpDeclared === null) {",
+                              'if (false) {');
+    if (mutated === G16) throw new Error('mutation target absent');
+    return /MISSING_OPTIMISTIC_TOKEN/.test(G16)
+      && !/if \(sadIntent === 'UPDATE_EXISTING_ROUTE' && sadExpDeclared === null\) \{/.test(mutated);
   });
 
   // I15 — the acknowledgement goes back to the boolean-only contract.

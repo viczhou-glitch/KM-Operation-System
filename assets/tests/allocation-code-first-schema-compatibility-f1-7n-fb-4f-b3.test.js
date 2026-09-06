@@ -173,6 +173,19 @@ function makeEnv(sadSrc, ricSrc) {
             body.intent = hasId ? 'UPDATE_EXISTING_ROUTE' : 'CREATE_NEW_ROUTE';
             if (!hasId && !body.create_idempotency_key) body.create_idempotency_key = 'CRI-B3-' + (++__criSeq);
         }
+  // R6-R6-R4-R2 — AN UPDATE NOW DECLARES THE VERSION IT READ. This shim mirrors the shipped client, and the
+  // shipped client sends expected_draft_version on every UPDATE_EXISTING_ROUTE; 16_ refuses one that does not
+  // (MISSING_OPTIMISTIC_TOKEN, zero rows written). Read from the stored row, exactly as the page reads it from
+  // the version it hydrated — never computed, and never filled in by the writer.
+        var _uId = String(h.allocation_draft_id || '').trim();
+        if (_uId && String(body.intent || h.intent || '') === 'UPDATE_EXISTING_ROUTE'
+            && h.expected_draft_version == null && body.expected_draft_version == null) {
+            env.headerObjs().forEach(function (o) {
+                if (String(o.allocation_draft_id || '') === _uId && String(o.draft_version || '') !== '') {
+                    h.expected_draft_version = String(o.draft_version);
+                }
+            });
+        }
         sandbox.__body = body; return vm.runInContext('sadAtomicUpsertCore_(__body)', ctx);
     };
     // F1-7N-FB-4G-A2-R3 - seed a row that PREDATES a schema append, without going through the writer.

@@ -4486,6 +4486,10 @@ function _irStampRouteGroupIds_(sku, g, draftId, draftVersion) {
                     if (g.routes[j] && String(g.routes[j].allocation_draft_line_id || '') === String(lid)) {
                         els[i].setAttribute('data-draft-id', draftId);
                         els[i].setAttribute('data-group-key', g.groupKey);
+                        // R6-R6-R4-R2 — the DOM adopts the new version too. Without this the next edit
+                        // would re-send the version this save just consumed and be refused STALE, which is
+                        // the failure the model-side adoption above was written to end.
+                        if (ver) els[i].setAttribute('data-draft-version', ver);
                         els[i].removeAttribute('data-dest-state');
                     }
                 }
@@ -6480,11 +6484,26 @@ function _saveAllocationDraftFromDom(sku) {
             String((_priorRow && _priorRow.allocation_draft_id) || '');   // the header this route is persisted under
         var boundGroupKey = rowEl.getAttribute('data-group-key') ||
             String((_priorRow && _priorRow.route_group_key) || '');       // the route group it was persisted as
+        // F1-7N-FC-1B-E3-R4-A2-R1-R6-R6-R4-R2 — THE HEADER VERSION THIS ROUTE WAS READ AT, and the reason it
+        // has to live on the row: this collector REPLACES replenAllocationDraft.bySku[sku] with what it
+        // rebuilds, so anything the hydrate put on the model and this literal does not carry is destroyed by
+        // the first edit — which is the event that schedules the write. draft_version was exactly that.
+        // _irStoredDraftVersion_ then found nothing, the header omitted expected_draft_version, and 16_'s
+        // optimistic guard runs ONLY when that field is present, so every Execution Plan save since this
+        // collector shipped was an UPDATE with no concurrency precondition at all. The DB version still
+        // advanced, because the writer increments whatever it finds — which is why a row at 3 was never
+        // evidence that the request had declared 2.
+        //
+        // Read-only, and never computed: the client adopts what the server returned and sends it back. A
+        // version this page never saw stays absent, and absence is now a REFUSAL rather than a free pass.
+        var boundDraftVersion = rowEl.getAttribute('data-draft-version') ||
+            String((_priorRow && _priorRow.draft_version) || '');
         // Re-publish what the model owns, so the DOM and the model can never disagree about identity.
         try {
             if (lineId) rowEl.setAttribute('data-line-id', lineId);
             if (boundDraftId) rowEl.setAttribute('data-draft-id', boundDraftId);
             if (boundGroupKey) rowEl.setAttribute('data-group-key', boundGroupKey);
+            if (boundDraftVersion) rowEl.setAttribute('data-draft-version', boundDraftVersion);
         } catch (_eId) {}
         // ALL rows are kept in the local render/recovery draft so an in-progress (still incomplete) route
         // survives collapse/expand. Whether a row is PERSISTED to the DB is decided ONLY by the shared
@@ -6531,6 +6550,8 @@ function _saveAllocationDraftFromDom(sku) {
             source_reason: 'pm_adjustment',
             allocation_draft_id: boundDraftId,
             route_group_key: boundGroupKey,
+            // R6-R6-R4-R2 — carried, not recomputed. This is what _irStoredDraftVersion_ reads.
+            draft_version: boundDraftVersion,
             // §D.6 — the selector's own value, kept so a re-render selects exactly what the user selected. For a
             // warehouse this equals destination_warehouse_id; for a marketplace it is the logical token.
             destination_token: destRawValue,
@@ -7982,6 +8003,9 @@ function _renderExecutionRoute(sku, route) {
     // save could soft-cancel or overwrite the wrong shipment group.
     if (route && route.allocation_draft_id) row.setAttribute('data-draft-id', String(route.allocation_draft_id));
     if (route && route.route_group_key) row.setAttribute('data-group-key', String(route.route_group_key));
+    // R6-R6-R4-R2 — and the version that header was READ at. It travels with the identity because the
+    // collector rebuilds from the DOM; a version left only on the model does not survive one edit.
+    if (route && route.draft_version) row.setAttribute('data-draft-version', String(route.draft_version));
     // F1-7N-FB-4F-B6 §F — a collect rebuilds every row from the DOM, so the fact that THIS row came out of the
     // database WITHOUT a destination has to survive on the row itself. Without it the next save could not tell an
     // adoption of an existing legacy header apart from an ordinary edit, and adoption is the one that needs an
