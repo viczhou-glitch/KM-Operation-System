@@ -67,7 +67,7 @@
 // §9 — THE CENSUS WAS REPORTING A BUILD IT NO LONGER WAS. Its behaviour changed in A2-R1-R1 (it learned to
 // read the harvest REFUSAL) and again in A2-R1-R2 (route intent + identity preview) while this literal stayed
 // at A2-R1, so a log could not be matched to the code that produced it. It moves with the file now.
-var TEMP_E3_CENSUS_BUILD_ = 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R6-R1';
+var TEMP_E3_CENSUS_BUILD_ = 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R6-R1-B1';
 
 /** Read-only row reader. The Sheet object stays inside this function — the caller gets values, never a writer. */
 // R6-R3 §2 — the OPTIONAL third argument is a metrics sink. §2 requires the diagnostic to report how many
@@ -3086,7 +3086,7 @@ function CENSUS_r6r6FinishPre_(out) {
 // ================================================================================================================
 var R6R6_FROZEN_BEFORE_ = {
   captured_from: 'RUN_R6R6_MANUAL_ROUTE_SAVE_PREFLIGHT (production, read-only, db_writes 0)',
-  captured_for_build: 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R6-R1',
+  captured_for_build: 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R6-R1-B1',
   verdict: 'EXACTLY_ONE_SAVE_TARGET',
   db_writes: 0,
 
@@ -3116,29 +3116,59 @@ var R6R6_FROZEN_BEFORE_ = {
   status: 'draft',
   generation_type: 'user_created',
   ownership: 'MANUAL (no generation_run_id — composed by a person)',
-  // The two timestamps the write path MOVES. They are in the allowed set, so they are frozen for the record
-  // and never compared for equality — freezing a value that is required to change would be a gate that fires
-  // on every correct run.
-  updated_at: null,
-  line_updated_at: null,
+  // R6-R6-R1-B1. THE TWO TIMESTAMPS, from the production capture. ALLOWED-TO-CHANGE AFTER THE SAVE DOES NOT
+  // MEAN ABSENT FROM THE BEFORE. A null here does not say 'this field may move'; it says 'this run has no
+  // idea what the row looked like', and those two must never be spelled the same way. Frozen, they carry
+  // their own asymmetry, which is the whole reason they belong in the BEFORE: readiness requires them EQUAL
+  // because nothing has happened yet, and the readback lets ROUTE A's move because moving them is what a
+  // landed write does. Route B's may never move in either, because Route B is not the row being changed.
+  updated_at: 'Thu Sep 03 2026 20:41:08 GMT+0800 (Taiwan Standard Time)',
+  line_updated_at: 'Thu Sep 03 2026 20:41:08 GMT+0800 (Taiwan Standard Time)',
 
   // The plan this row sits in. A completion must not change the shape of it.
   header_count: 2,
   line_count: 2,
-  // THE OTHER VISIBLE ROW. Every field below is a value the production evidence states; the fields the
-  // evidence in hand does NOT state are absent rather than guessed, and each absent field is reported in
-  // `other_row_snapshot_gaps` on every verdict. A guessed `shipping_method` would produce a STOP that means
-  // nothing, and a STOP that means nothing is the blocker this whole round exists to remove.
+  // THE OTHER VISIBLE ROW, NOW COMPLETE. The full production BEFORE for Route B was supplied, so every
+  // field it carries is frozen and `other_row_snapshot_gaps` is empty: no field of this row falls back to
+  // 'not checked', which is the answer that let an unrelated route move without anyone noticing.
+  //
+  // CASING. Route A's scope fields are lowercase because they were read from the K4 key, which lowercases
+  // every segment by construction; Route B's come from the row itself and are frozen in the row's own
+  // spelling. Both are correct, because every one of them is compared case-insensitively — and freezing
+  // Route B in a case it does not actually store would be inventing evidence to match a comparison that
+  // does not need it.
   other_rows: [
     {
       allocation_draft_id: 'SADH-K4-A3872518',
       allocation_draft_line_id: 'SADL-K2-344FB2B2',
+      k4_group_key: '|resus|us|amazon|inventory_replenishment|wh-tw-cn-factory-youxin|warehouse|wh-resus-us-3pl-amzlgs|air||',
       sku: 'CO1100-R',
-      company: 'resus',
-      country: 'us',
-      station_marketplace: 'amazon',
+      company: 'ResUS',
+      country: 'US',
+      station_marketplace: 'Amazon',
+      destination_kind: 'WAREHOUSE',
+      destination_id: 'WH-RESUS-US-3PL-AMZLGS',
+      destination_marketplace: '',
+      source_warehouse_id: 'WH-TW-CN-FACTORY-YOUXIN',
       quantity: 200,
-      destination_kind: 'warehouse'
+      status: 'draft',
+      generation_type: 'user_created',
+      ownership: 'MANUAL (no generation_run_id — composed by a person)',
+      shipping_method: 'air',
+      last_mile_delivery: '',
+      expected_arrival: '',
+      draft_version: '1',
+      updated_at: 'Thu Sep 03 2026 22:04:49 GMT+0800 (Taiwan Standard Time)',
+      line_updated_at: 'Thu Sep 03 2026 22:04:49 GMT+0800 (Taiwan Standard Time)',
+      // RECORDED, NOT GATED. `line_status` and the three save-target facts are part of the captured BEFORE
+      // and are kept so the record is the evidence rather than a subset of it. They are not compared: the
+      // save-target fields are a RESOLVER's answer about a row nobody is authorized to touch this round, and
+      // a third route appearing elsewhere in the plan could move them without Route B changing at all. A
+      // gate that a bystander can trip is a STOP that means nothing.
+      line_status: '',
+      save_target_status: 'REUSE',
+      save_target_allocation_draft_id: 'SADH-K4-A3872518',
+      save_would_mint_new_header: false
     }
   ],
 
@@ -3155,10 +3185,17 @@ var R6R6_FROZEN_REQUIRED_FIELDS_ = ['allocation_draft_id', 'allocation_draft_lin
   'company', 'country', 'station_marketplace', 'sku', 'source_warehouse_id', 'destination_kind', 'destination_id',
   'quantity', 'shipping_method', 'last_mile_delivery', 'expected_arrival', 'k4_group_key',
   'header_count', 'line_count', 'allowed_mutation_fields', 'forbidden_mutation_fields'];
-// The three fields that were briefly enforced as invariants because I recorded them as uncaptured. They are
-// captured, so they are EQUALITY gates, and this list is what makes their absence a STOP rather than a
-// silently weaker check. `snapshot_gaps` must be empty for the frozen readback to proceed at all.
-var R6R6_FROZEN_EQUALITY_FIELDS_ = ['status', 'generation_type', 'ownership'];
+// THE TIMESTAMPS, COMPARED AS INSTANTS RATHER THAN AS DISPLAY STRINGS. A sheet returns a Date, a frozen
+// constant holds the string a human pasted, and a runtime can spell the same instant
+// 'GMT+0800 (Taiwan Standard Time)' or 'GMT+0800 (CST)'. Comparing those as text produces a STOP for a
+// zone-name spelling, which is exactly the meaningless STOP this round exists to remove.
+var R6R6_TIMESTAMP_FIELDS_ = ['updated_at', 'line_updated_at'];
+// The fields that were briefly enforced as invariants, or omitted outright, because I recorded them as
+// uncaptured. They are captured, so they are EQUALITY gates, and this list is what makes their absence a
+// STOP rather than a silently weaker check. `snapshot_gaps` must be empty for the frozen readback to
+// proceed at all — a null in any of these is a snapshot that cannot decide, and it must say so rather than
+// present itself as complete.
+var R6R6_FROZEN_EQUALITY_FIELDS_ = ['status', 'generation_type', 'ownership', 'updated_at', 'line_updated_at'];
 // The statuses under which a route is still part of the current plan (KMARC's ACTIVE set). Kept as a SECOND,
 // weaker gate beside the equality check above — it costs nothing and it still refuses a row that has left
 // the plan even if a future freeze omits `status`.
@@ -3216,14 +3253,41 @@ function CENSUS_r6r6K4WithLastMile_(k4, lastMile) {
 // Field-by-field drift between a frozen row and a live one, over the fields the frozen row actually carries.
 // Returns the drift and the list of fields it could not compare — never a bare boolean, because "unchanged"
 // and "not checked" are the two answers this whole contract exists to keep apart.
+// A timestamp reduced to the INSTANT it names, so two spellings of one moment compare equal and two
+// different moments never do. An unparseable value falls back to its own text rather than to 0, because a
+// timestamp nobody can read is not the epoch.
+function CENSUS_r6r6TsKey_(v) {
+  if (v === null || v === undefined) return '';
+  if (Object.prototype.toString.call(v) === '[object Date]') {
+    return isFinite(v.getTime()) ? String(v.getTime()) : '';
+  }
+  var s = CENSUS_str_(v);
+  if (s === '') return '';
+  var t = Date.parse(s);
+  return isFinite(t) ? String(t) : s.toLowerCase();
+}
+
+// THE ONE PLACE THAT DECIDES WHETHER TWO VALUES OF A FIELD ARE THE SAME VALUE. Readiness and both readback
+// entry points call it, for Route A and for every companion route, so 'equal' cannot come to mean one thing
+// before the click and another thing after it. It returns the DISPLAY values alongside the verdict: the
+// comparison runs on normalised keys, but a reader of `route_a_drift` must see the timestamp, not its epoch.
+function CENSUS_r6r6Cmp_(field, frozenVal, liveVal) {
+  var bv = CENSUS_str_(frozenVal), av = CENSUS_str_(liveVal), bk, ak;
+  if (R6R6_TIMESTAMP_FIELDS_.indexOf(field) !== -1) {
+    bk = CENSUS_r6r6TsKey_(frozenVal); ak = CENSUS_r6r6TsKey_(liveVal);
+  } else if (R6R6_CASE_INSENSITIVE_FIELDS_.indexOf(field) !== -1) {
+    bv = bv.toLowerCase(); av = av.toLowerCase(); bk = bv; ak = av;
+  } else { bk = bv; ak = av; }
+  return { equal: bk === ak, frozen: bv, live: av };
+}
+
 function CENSUS_r6r6DiffRow_(frozen, live, fields) {
   var drift = [], uncompared = [];
   for (var i = 0; i < fields.length; i++) {
     var k = fields[i];
     if (frozen[k] === null || frozen[k] === undefined) { uncompared.push(k); continue; }
-    var bv = CENSUS_str_(frozen[k]), av = CENSUS_str_(live[k]);
-    if (R6R6_CASE_INSENSITIVE_FIELDS_.indexOf(k) !== -1) { bv = bv.toLowerCase(); av = av.toLowerCase(); }
-    if (bv !== av) drift.push({ field: k, frozen: bv, live: av });
+    var c = CENSUS_r6r6Cmp_(k, frozen[k], live[k]);
+    if (!c.equal) drift.push({ field: k, frozen: c.frozen, live: c.live });
   }
   return { drift: drift, uncompared: uncompared };
 }
@@ -3285,9 +3349,13 @@ function RUN_R6R6_MANUAL_ROUTE_SAVE_FROZEN_READINESS() {
   out.last_mile_live = CENSUS_str_(a.last_mile_delivery);
 
   // 3. NOTHING HAS HAPPENED YET, and that is what separates this from the readback: the last mile must still
-  //    be blank and the version must still be the one that was frozen.
+  //    be blank, the version must still be the one that was frozen, AND THE TIMESTAMPS MUST STILL MATCH.
+  //    The timestamps are the strongest of the three. A row can be written and put back with the same last
+  //    mile and, if the writer did not bump it, the same version — but a write always moves updated_at. So
+  //    here, where the claim is 'production is still exactly the BEFORE', they are equality gates like any
+  //    other. It is only AFTER the authorized Save that Route A's are expected to have moved.
   var eqFields = R6R6_FORBIDDEN_MUTATION_FIELDS_.concat(R6R6_DERIVED_MUTATION_FIELDS_)
-    .concat(['last_mile_delivery', 'expected_arrival']);
+    .concat(['last_mile_delivery', 'expected_arrival']).concat(R6R6_TIMESTAMP_FIELDS_);
   var dA = CENSUS_r6r6DiffRow_(snap, a, eqFields);
   out.route_a_drift = dA.drift;
 
@@ -3321,8 +3389,11 @@ function RUN_R6R6_MANUAL_ROUTE_SAVE_FROZEN_READINESS() {
     out.stop_reason = 'the last mile is already set to "' + out.last_mile_live + '". This row is not awaiting'
       + ' completion any more, so the authorized action does not apply to it.';
   } else if (out.route_a_drift.length) {
+    var aTs = out.route_a_drift.filter(function (x) { return R6R6_TIMESTAMP_FIELDS_.indexOf(x.field) !== -1; });
     out.stop_reason = 'Route A has drifted from the freeze on: '
-      + out.route_a_drift.map(function (x) { return x.field; }).join(', ');
+      + out.route_a_drift.map(function (x) { return x.field; }).join(', ')
+      + (aTs.length ? '. A moved timestamp means SOMETHING HAS ALREADY WRITTEN to this row since the capture,'
+        + ' even where every other field still matches; re-freeze before doing anything.' : '');
   } else if (out.missing_other_rows.length) {
     out.stop_reason = 'a frozen companion route is gone: ' + out.missing_other_rows.join(', ');
   } else if (out.route_b_drift.length) {
@@ -3435,12 +3506,16 @@ function RUN_R6R6_MANUAL_ROUTE_SAVE_READBACK(before) {
   for (var fi = 0; fi < fields.length; fi++) {
     var k = fields[fi];
     if (out.snapshot_gaps.indexOf(k) !== -1) continue;      // not captured — see the invariant gates
-    var bv = CENSUS_str_(b[k]), av = CENSUS_str_(a[k]);
-    // The scope fields are read from the K4 key, which lowercases every segment by construction, so they are
-    // compared case-insensitively. A warehouse id spelled in a different case is not a mutation.
-    if (R6R6_CASE_INSENSITIVE_FIELDS_.indexOf(k) !== -1) { bv = bv.toLowerCase(); av = av.toLowerCase(); }
-    if (bv === av) continue;
-    out.changed_fields.push({ field: k, before: bv, after: av });
+    // ONE comparison core, shared with readiness: the scope fields are case-insensitive because they come
+    // from a key that lowercases every segment, and the timestamps compare as instants rather than as the
+    // text a runtime happened to print. Route A's timestamps MAY move here — they are in the allowed set,
+    // because moving them is precisely what a landed write does.
+    // The freeze names the version `expected_draft_version`, because that is what an UPDATE sends. Read it
+    // under the row's own name here, or `changed_fields` reports the version arriving out of nowhere.
+    var bRaw = (k === 'draft_version' && (b[k] === null || b[k] === undefined)) ? b.expected_draft_version : b[k];
+    var c = CENSUS_r6r6Cmp_(k, bRaw, a[k]);
+    if (c.equal) continue;
+    out.changed_fields.push({ field: k, before: c.frozen, after: c.live });
     if (R6R6_FORBIDDEN_MUTATION_FIELDS_.indexOf(k) !== -1) out.unexpected_changed_fields.push(k);
   }
   // Route B and every other visible row, compared field by field against its own frozen copy.
@@ -3473,11 +3548,14 @@ function RUN_R6R6_MANUAL_ROUTE_SAVE_READBACK(before) {
         if (out.other_row_snapshot_gaps.indexOf(gapKey) === -1) out.other_row_snapshot_gaps.push(gapKey);
         continue;
       }
-      var obv = CENSUS_str_(ob[kk]), oav = CENSUS_str_(oa[kk]);
-      if (R6R6_CASE_INSENSITIVE_FIELDS_.indexOf(kk) !== -1) { obv = obv.toLowerCase(); oav = oav.toLowerCase(); }
-      if (obv !== oav) {
+      // The same core again, and note what it means for a COMPANION route: `updated_at` is in the allowed
+      // set for Route A, the row being changed, and there is no such allowance here. Route B is not being
+      // touched, so a moved timestamp on it is drift — the clearest evidence there is that a save reached
+      // further than the one row it was authorized to reach.
+      var oc = CENSUS_r6r6Cmp_(kk, ob[kk], oa[kk]);
+      if (!oc.equal) {
         drift.push({ visible_row_key: CENSUS_str_(ob.visible_row_key) || CENSUS_str_(ob.allocation_draft_id),
-          field: kk, before: obv, after: oav });
+          field: kk, before: oc.frozen, after: oc.live });
       }
     }
   }

@@ -625,24 +625,29 @@ eq(snapIssues(null), ['the frozen snapshot constant is absent'], 'R5  an absent 
 // ---- THE NINE STOP GATES, each executed --------------------------------------------------------------------
 // The live plan the freeze describes, rebuilt as sheets so the frozen constant is what the readback compares
 // against. Route A is the marketplace route; the ids and the K4 inputs match the production capture.
+var TS_A = 'Thu Sep 03 2026 20:41:08 GMT+0800 (Taiwan Standard Time)';
+var TS_B = 'Thu Sep 03 2026 22:04:49 GMT+0800 (Taiwan Standard Time)';
 var PROD_HEADER = { allocation_draft_id: 'SADH-K4-38523A90', company: 'ResUS', country: 'US',
   marketplace: 'Amazon', status: 'draft', destination_marketplace: 'Amazon',
   recommended_source_warehouse_id: 'WH-TW-CN-FACTORY-YOUXIN', recommended_shipping_method: 'sea_express',
   recommended_last_mile_delivery: '', draft_version: 1, generation_type: 'user_created',
-  updated_at: '2026-09-05 10:00:00' };
+  updated_at: TS_A };
 var PROD_LINE = { allocation_draft_line_id: 'SADL-K2-92B8BAD2', allocation_draft_id: 'SADH-K4-38523A90',
   sku: SKU, planned_qty: 320, line_status: 'draft', source_warehouse_id: 'WH-TW-CN-FACTORY-YOUXIN',
   destination_kind: 'MARKETPLACE', destination_marketplace: 'Amazon', expected_arrival: '',
-  updated_at: '2026-09-05 10:00:00' };
+  updated_at: TS_A };
+// ROUTE B IS THE PRODUCTION ROUTE B NOW, field for field. Its last mile is BLANK and its version is 1,
+// exactly as the capture states — the earlier fixture invented a PARCEL route at version 2, which was
+// harmless only for as long as those fields went uncompared.
 var PROD_B_HEADER = { allocation_draft_id: 'SADH-K4-A3872518', company: 'ResUS', country: 'US',
-  marketplace: 'Amazon', status: 'draft', recommended_destination_warehouse_id: 'WH-AMZLGS-IN',
+  marketplace: 'Amazon', status: 'draft', recommended_destination_warehouse_id: 'WH-RESUS-US-3PL-AMZLGS',
   recommended_source_warehouse_id: 'WH-TW-CN-FACTORY-YOUXIN', recommended_shipping_method: 'air',
-  recommended_last_mile_delivery: 'PARCEL', draft_version: 2, generation_type: 'user_created',
-  updated_at: '2026-09-01 09:00:00' };
+  recommended_last_mile_delivery: '', draft_version: 1, generation_type: 'user_created',
+  updated_at: TS_B };
 var PROD_B_LINE = { allocation_draft_line_id: 'SADL-K2-344FB2B2', allocation_draft_id: 'SADH-K4-A3872518',
-  sku: SKU, planned_qty: 200, line_status: 'draft', source_warehouse_id: 'WH-TW-CN-FACTORY-YOUXIN',
-  destination_kind: 'WAREHOUSE', destination_warehouse_id: 'WH-AMZLGS-IN', expected_arrival: '2026-09-20',
-  updated_at: '2026-09-01 09:00:00' };
+  sku: SKU, planned_qty: 200, line_status: '', source_warehouse_id: 'WH-TW-CN-FACTORY-YOUXIN',
+  destination_kind: 'WAREHOUSE', destination_warehouse_id: 'WH-RESUS-US-3PL-AMZLGS', expected_arrival: '',
+  updated_at: TS_B };
 function prodSheets(mut) {
   mut = mut || {};
   function cp(o, over) { var x = {}; Object.keys(o).forEach(function (k) { x[k] = o[k]; });
@@ -659,8 +664,9 @@ function frozenRun(mut) {
   return (runCensus('RUN_R6R6_MANUAL_ROUTE_SAVE_READBACK_FROZEN', prodSheets(mut)).res) || {};
 }
 // The authorized change, and nothing else: last mile blank -> TRUCK, version 1 -> 2, ETA now resolvable.
+var TS_A_AFTER = 'Thu Sep 03 2026 21:15:02 GMT+0800 (Taiwan Standard Time)';
 var GOOD = { aHeader: { recommended_last_mile_delivery: 'TRUCK', draft_version: 2,
-  updated_at: '2026-09-05 12:00:00' }, aLine: { expected_arrival: '2026-10-15', updated_at: '2026-09-05 12:00:00' } };
+  updated_at: TS_A_AFTER }, aLine: { expected_arrival: '2026-10-15', updated_at: TS_A_AFTER } };
 var OKR = frozenRun(GOOD);
 eq(OKR.census, 'RUN_R6R6_MANUAL_ROUTE_SAVE_READBACK_FROZEN', 'R6  the frozen readback runs with no arguments');
 eq(OKR.verdict, 'NARROW_MUTATION_CONFIRMED', 'R6a and the authorized change is the ONLY success verdict');
@@ -848,7 +854,7 @@ function refuses(label, mut, fragment, censusSrc) {
 }
 // A SNAPSHOT GAP. Any equality field without a frozen value refuses, rather than falling through to the
 // weaker invariant and certifying something it cannot support.
-['status', 'generation_type', 'ownership'].forEach(function (k) {
+['status', 'generation_type', 'ownership', 'updated_at', 'line_updated_at'].forEach(function (k) {
   var m = CENSUS.replace(new RegExp('  ' + k + ": '[^']*',"), '  ' + k + ': null,');
   var r = refuses('S2  a snapshot gap on ' + k, {}, 'missing required field: ' + k, m);
   ok((r.snapshot_gaps || []).indexOf(k) !== -1, 'S2a and ' + k + ' is named in snapshot_gaps');
@@ -904,6 +910,115 @@ mut('S-M3 readiness accepting a version that already moved', function () {
     '  if (CENSUS_str_(a.draft_version) !== CENSUS_str_(snap.expected_draft_version)) {', '  if (false) {');
   return readyRun({ aHeader: { draft_version: 2 } }, m).verdict === 'FROZEN_READBACK_READY'
     && readyRun({ aHeader: { draft_version: 2 } }).verdict === 'STOP';
+});
+
+// ---- R6-R6-R1-B1 \u2014 THE TIMESTAMPS ARE PART OF THE BEFORE ---------------------------------------------------
+// ALLOWED-TO-CHANGE AFTER THE SAVE IS NOT THE SAME CLAIM AS ABSENT FROM THE BEFORE, and the previous round
+// spelled them the same way: both timestamps were frozen as null. A null does not say 'this may move', it
+// says 'this run has no idea what the row looked like' \u2014 and it says it in the one field that moves on
+// EVERY write, which makes it the most sensitive evidence the freeze can hold that nothing has happened yet.
+ok(/updated_at: 'Thu Sep 03 2026 20:41:08/.test(FROZEN) && /line_updated_at: 'Thu Sep 03 2026 20:41:08/.test(FROZEN),
+  'S7  Route A\'s two timestamps are frozen by value, not as null');
+ok(!/^  updated_at: null/m.test(FROZEN) && !/^  line_updated_at: null/m.test(FROZEN),
+  'S7a and neither is null any more');
+// BEFORE the click: a moved timestamp is a write nobody in this round performed.
+var TSDRIFT = refuses('S7b Route A updated_at moved before the Save', { aHeader: { updated_at: TS_A_AFTER } },
+  'Route A has drifted.*updated_at');
+ok(/SOMETHING HAS ALREADY WRITTEN/.test(TSDRIFT.stop_reason),
+  'S7c and the reason says what a moved timestamp MEANS, not merely which field differs');
+refuses('S7d Route A line_updated_at moved before the Save', { aLine: { updated_at: TS_A_AFTER } },
+  'Route A has drifted.*line_updated_at');
+// A row can be written and put back with the same last mile and the same version. It cannot be written and
+// put back with the same updated_at, which is why this gate catches what the other two cannot.
+eq(readyRun({ aHeader: { updated_at: TS_A_AFTER } }).route_a_drift.map(function (x) { return x.field; }),
+  ['updated_at'], 'S7e a silent write that left every OTHER field alone is still caught, and only here');
+
+// ---- ROUTE B, COMPLETE \u2014 AND ITS TIMESTAMPS MAY NEVER MOVE IN EITHER DIRECTION -------------------------
+// Route B is not the row being changed. Route A's timestamps are in the allowed set because moving them is
+// what a landed write DOES; there is no such allowance for a bystander, so a moved timestamp on Route B is
+// the clearest evidence there is that a save reached further than the one row it was authorized to reach.
+refuses('S8  Route B updated_at drifted', { bHeader: { updated_at: TS_A_AFTER } },
+  'companion route has drifted.*updated_at');
+refuses('S8a Route B line_updated_at drifted', { bLine: { updated_at: TS_A_AFTER } },
+  'companion route has drifted.*line_updated_at');
+var BTS = frozenRun({ aHeader: { recommended_last_mile_delivery: 'TRUCK', draft_version: 2, updated_at: TS_A_AFTER },
+  aLine: { expected_arrival: '2026-10-15', updated_at: TS_A_AFTER }, bHeader: { updated_at: TS_A_AFTER } });
+eq(BTS.verdict, 'STOP', 'S8b and AFTER the Save too: an otherwise perfect change that also touched Route B');
+ok(/another visible route drifted/.test(BTS.stop_reason) &&
+  BTS.other_row_drift.some(function (x) { return x.field === 'updated_at'; }),
+  'S8c naming the companion route and the field, so the operator knows what the save reached');
+// Every field of Route B is frozen, so NOTHING about it falls back to 'not checked'.
+eq(RDY.other_row_snapshot_gaps, [], 'S8d readiness compares Route B on every field it carries');
+eq(OKR.other_row_snapshot_gaps, [], 'S8e and so does the readback');
+eq(OKR.other_row_guarantee, 'other routes compared field by field',
+  'S8f which is what lets the guarantee be stated without an exception list');
+['SADH-K4-A3872518', 'SADL-K2-344FB2B2', 'wh-resus-us-3pl-amzlgs|air||', 'WH-RESUS-US-3PL-AMZLGS',
+ "shipping_method: 'air'", "draft_version: '1'", 'Thu Sep 03 2026 22:04:49'].forEach(function (frag, i) {
+  ok(FROZEN.indexOf(frag) !== -1, 'S8g[' + i + '] the Route B freeze carries ' + frag);
+});
+
+// ---- AFTER THE SAVE, ROUTE A'S TIMESTAMPS ARE EXPECTED TO HAVE MOVED ----------------------------------------
+// The asymmetry is the point. The same two fields are an equality gate before the click and an allowed
+// change after it, because before the click a movement is someone else's write and after it, it is ours.
+eq(OKR.verdict, 'NARROW_MUTATION_CONFIRMED', 'S9  a Save that moved Route A\'s timestamps still confirms');
+eq(OKR.unexpected_changed_fields, [], 'S9a with the movement classified as ALLOWED, not as a violation');
+var movedTs = OKR.changed_fields.filter(function (x) {
+  return x.field === 'updated_at' || x.field === 'line_updated_at'; });
+eq(movedTs.length, 2, 'S9b both are REPORTED as changed rather than hidden');
+eq(movedTs[0].before, TS_A, 'S9c and the report shows the timestamp a person can read, not its epoch');
+eq(readyRun({ aHeader: { updated_at: TS_A_AFTER } }).verdict, 'STOP',
+  'S9d while the very same movement, before the click, is a STOP');
+// The version is reported under the row's own name, so a reader is not told it came from nowhere.
+var vch = OKR.changed_fields.filter(function (x) { return x.field === 'draft_version'; })[0];
+eq([vch.before, vch.after], ['1', '2'], 'S9e and the version reads 1 -> 2, not \'\' -> 2');
+
+// ---- AN INSTANT, NOT A SPELLING OF ONE ----------------------------------------------------------------------
+// A sheet returns a Date, the freeze holds the string a person pasted, and a runtime may print the same
+// moment as (Taiwan Standard Time) or (CST) or in UTC. Comparing those as text would STOP for a zone name,
+// and a STOP that means nothing is the blocker this whole round exists to remove.
+[['Thu Sep 03 2026 22:04:49 GMT+0800 (CST)', 'a different zone NAME'],
+ ['Thu Sep 03 2026 14:04:49 GMT+0000', 'the same instant written in UTC']].forEach(function (cse, i) {
+  eq(readyRun({ bHeader: { updated_at: cse[0] } }).verdict, 'FROZEN_READBACK_READY',
+    'S10[' + i + '] ' + cse[1] + ' is the same instant, so it is not drift');
+});
+refuses('S10a but one second later IS drift', { bHeader: { updated_at: 'Thu Sep 03 2026 22:04:50 GMT+0800' } },
+  'companion route has drifted');
+var tsKey = censusHelper('CENSUS_r6r6TsKey_');
+eq(tsKey(''), '', 'S10b a blank timestamp keys to blank, never to the epoch');
+eq(tsKey('not a date at all'), 'not a date at all',
+  'S10c and an unreadable one falls back to its own text \u2014 a timestamp nobody can read is not 1970');
+
+mut('S-M4 a null timestamp masquerading as a complete snapshot', function () {
+  // The exact shape of the defect this round corrects: the freeze carries no BEFORE for updated_at, and the
+  // run reports snapshot_gaps [] and declares itself READY anyway.
+  var nulled = CENSUS.replace(/  updated_at: 'Thu Sep 03 2026 20:41:08[^']*',/, '  updated_at: null,');
+  var m = nulled.replace('  if (out.snapshot_issues.length || out.snapshot_gaps.length) {', '  if (false) {');
+  var mutant = readyRun({}, m), shipped = readyRun({}, nulled);
+  return mutant.verdict === 'FROZEN_READBACK_READY' && JSON.stringify(mutant.snapshot_gaps) !== '[]'
+    && shipped.verdict === 'STOP' && (shipped.snapshot_gaps || []).indexOf('updated_at') !== -1;
+});
+mut('S-M5 the timestamps dropped from the equality set, leaving the freeze \'complete\' with a hole', function () {
+  var m = CENSUS.replace(
+    "var R6R6_FROZEN_EQUALITY_FIELDS_ = ['status', 'generation_type', 'ownership', 'updated_at', 'line_updated_at'];",
+    "var R6R6_FROZEN_EQUALITY_FIELDS_ = ['status', 'generation_type', 'ownership'];")
+    .replace("    .concat(['last_mile_delivery', 'expected_arrival']).concat(R6R6_TIMESTAMP_FIELDS_);",
+      "    .concat(['last_mile_delivery', 'expected_arrival']);");
+  return readyRun({ aHeader: { updated_at: TS_A_AFTER } }, m).verdict === 'FROZEN_READBACK_READY'
+    && readyRun({ aHeader: { updated_at: TS_A_AFTER } }).verdict === 'STOP';
+});
+mut('S-M6 timestamps compared as display text instead of as instants', function () {
+  var m = CENSUS.replace('    bk = CENSUS_r6r6TsKey_(frozenVal); ak = CENSUS_r6r6TsKey_(liveVal);',
+    '    bk = bv; ak = av;');
+  // Same instant, other zone name: the shipped comparison accepts it and the text one invents a drift.
+  return readyRun({ bHeader: { updated_at: 'Thu Sep 03 2026 22:04:49 GMT+0800 (CST)' } }, m).verdict === 'STOP'
+    && readyRun({ bHeader: { updated_at: 'Thu Sep 03 2026 22:04:49 GMT+0800 (CST)' } }).verdict === 'FROZEN_READBACK_READY';
+});
+mut('S-M7 one comparison core per entry point instead of one shared', function () {
+  // Route B's drift is found by the SAME function before and after the click. Break the core and both fail,
+  // which is the property having one core buys: they cannot come to disagree about what equal means.
+  var m = CENSUS.replace('  return { equal: bk === ak, frozen: bv, live: av };', '  return { equal: true, frozen: bv, live: av };');
+  return readyRun({ bLine: { planned_qty: 199 } }, m).verdict === 'FROZEN_READBACK_READY'
+    && ((runCensus('RUN_R6R6_MANUAL_ROUTE_SAVE_READBACK_FROZEN', prodSheets({ bLine: { planned_qty: 199 } }), null, m).res) || {}).route_b_unchanged === true;
 });
 
 // THE PREFLIGHT NOW EMITS A PASTE-READY FREEZE, so a LATER capture needs no hand-transcription.
