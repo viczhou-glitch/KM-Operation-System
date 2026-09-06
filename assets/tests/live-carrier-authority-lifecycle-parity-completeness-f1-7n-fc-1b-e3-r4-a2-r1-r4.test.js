@@ -737,8 +737,22 @@ var TEMPSRC = read('assets/tools/apps-script-diagnostics/TEMP_AI_PLAN_ACTIVATION
 ok(/function RUN_E3_CENSUS_RESUS_US_AMAZON_CO1100R\(\)/.test(TEMPSRC),
   'G1  the operator entry point still takes NO parameters');
 ok(/company: 'ResUS'[\s\S]{0,200}sku: 'CO1100-R'/.test(TEMPSRC), 'G1a with the scope hard-coded');
-ok(!/handleUpsertShippingAllocationDraftAtomic_\s*\(/.test(TEMPSRC),
-  'G2  and the census constructs NO writer');
+// R6-R6-R3 — THIS GUARANTEE WAS ABSOLUTE AND IS NOW BOUNDED, DELIBERATELY. The file gained a writer:
+// RUN_R6R6R3_ROUTE_B_REPAIR_EXECUTE_ONCE compensates the route the 2026-09-06 incident wrote without
+// authorization. 'The census never calls the writer' is therefore false, and an assertion that keeps
+// saying it would have to be deleted rather than corrected. The property worth keeping is the one that
+// still holds: there is EXACTLY ONE such call, it lives in EXACTLY ONE named function, and no entry
+// point writes a cell directly.
+var _g2Stripped = TEMPSRC.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/[^\n]*/g, '$1 ');
+eq((_g2Stripped.match(/handleUpsertShippingAllocationDraftAtomic_\s*\(/g) || []).length, 1,
+  'G2  the census contains EXACTLY ONE call to the atomic writer');
+var _g2ExecFrom = TEMPSRC.indexOf('function RUN_R6R6R3_ROUTE_B_REPAIR_EXECUTE_ONCE(');
+var _g2ExecTo = TEMPSRC.indexOf('function CENSUS_r6r6r3FinishExec_(');
+ok(_g2ExecFrom > 0 && _g2ExecTo > _g2ExecFrom
+  && /handleUpsertShippingAllocationDraftAtomic_\s*\(/.test(TEMPSRC.slice(_g2ExecFrom, _g2ExecTo)),
+  'G2a and it is inside RUN_R6R6R3_ROUTE_B_REPAIR_EXECUTE_ONCE, which is the only function allowed to have it');
+ok(!/\.setValue\(|\.appendRow\(|\.deleteRow\(|\.clearContent\(/.test(_g2Stripped),
+  'G2b and no entry point writes a cell directly — every mutation goes through 16_ under its own lock');
 eq(census(hA).production_parity.writer_constructed, false, 'G2a and reports that it did not');
 eq(hA.SHEETS['shipping_allocation_drafts'].rows.length, 1, 'G2b zero DB writes from a census run');
 

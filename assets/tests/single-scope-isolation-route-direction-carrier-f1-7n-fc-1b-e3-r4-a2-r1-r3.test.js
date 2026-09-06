@@ -715,8 +715,24 @@ eq(CEN.matched_carrier_cards, R.routes.length ? CEN.matched_carrier_cards : 0,
 ok(typeof CEN.matched_carrier_cards === 'number' && CEN.matched_carrier_cards > 0,
   'H8a and it is no longer 0 for a lane that resolves');
 eq(CEN.writer_constructed, false, 'H9  and the census still constructs no writer');
-ok(!/handleUpsertShippingAllocationDraftAtomic_\s*\(|weeklyAiPlanGenerateK2_\s*\(/.test(TEMP),
-  'H9a and never CALLS the writer or the generation entry point (naming one in a comment is not reaching for it)');
+ok(!/weeklyAiPlanGenerateK2_\s*\(/.test(TEMP),
+  'H9a and never calls the GENERATION entry point (naming one in a comment is not reaching for it)');
+// R6-R6-R3 — THIS GUARANTEE WAS ABSOLUTE AND IS NOW BOUNDED, DELIBERATELY. The file gained a writer:
+// RUN_R6R6R3_ROUTE_B_REPAIR_EXECUTE_ONCE compensates the route the 2026-09-06 incident wrote without
+// authorization. 'The census never calls the writer' is therefore false, and an assertion that keeps
+// saying it would have to be deleted rather than corrected. The property worth keeping is the one that
+// still holds: there is EXACTLY ONE such call, it lives in EXACTLY ONE named function, and no entry
+// point writes a cell directly.
+var _h9Stripped = TEMP.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/[^\n]*/g, '$1 ');
+eq((_h9Stripped.match(/handleUpsertShippingAllocationDraftAtomic_\s*\(/g) || []).length, 1,
+  'H9b  the census contains EXACTLY ONE call to the atomic writer');
+var _h9ExecFrom = TEMP.indexOf('function RUN_R6R6R3_ROUTE_B_REPAIR_EXECUTE_ONCE(');
+var _h9ExecTo = TEMP.indexOf('function CENSUS_r6r6r3FinishExec_(');
+ok(_h9ExecFrom > 0 && _h9ExecTo > _h9ExecFrom
+  && /handleUpsertShippingAllocationDraftAtomic_\s*\(/.test(TEMP.slice(_h9ExecFrom, _h9ExecTo)),
+  'H9ba and it is inside RUN_R6R6R3_ROUTE_B_REPAIR_EXECUTE_ONCE, which is the only function allowed to have it');
+ok(!/\.setValue\(|\.appendRow\(|\.deleteRow\(|\.clearContent\(/.test(_h9Stripped),
+  'H9bb and no entry point writes a cell directly — every mutation goes through 16_ under its own lock');
 
 // ================================================================================================================
 section('I. §10 — production / census parity, field by field');

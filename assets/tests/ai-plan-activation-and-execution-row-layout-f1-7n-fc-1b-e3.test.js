@@ -1031,6 +1031,12 @@ ok(/function TEMP_AI_PLAN_ACTIVATION_CENSUS_FC1B_E3\(args\)/.test(TEMP), 'F1  th
     // all, which is asserted in its own suite rather than left to this list to imply. They sit HERE because
     // the list is compared sorted and '_' sorts after 'R', so RUN_R6R6R2_* precedes every RUN_R6R6_*.
     'RUN_R6R6R2_AFTER_STATE_CENSUS', 'RUN_R6R6R2_ROUTE_B_REPAIR_MANIFEST',
+    // R6-R6-R3 adds the repair TOOL: a preflight, the one writer this file has, and a readback. The writer
+    // is the reason F1a1 below is not the whole story any more — it takes no arguments like the rest, but
+    // it is the single function in the project that may mutate from a diagnostic, and its own suite proves
+    // it re-runs the preflight, calls the writer at most once and never retries.
+    'RUN_R6R6R3_ROUTE_B_REPAIR_EXECUTE_ONCE', 'RUN_R6R6R3_ROUTE_B_REPAIR_PREFLIGHT',
+    'RUN_R6R6R3_ROUTE_B_REPAIR_READBACK',
     // R6-R6-R1 adds the two no-argument entry points the editor can actually run: the pre-write readiness
     // verdict and the frozen readback. Listed in SORTED order, because the assertion compares sorted lists.
     'RUN_R6R6_MANUAL_ROUTE_SAVE_FROZEN_READINESS',

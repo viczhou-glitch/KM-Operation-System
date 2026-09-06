@@ -67,7 +67,7 @@
 // §9 — THE CENSUS WAS REPORTING A BUILD IT NO LONGER WAS. Its behaviour changed in A2-R1-R1 (it learned to
 // read the harvest REFUSAL) and again in A2-R1-R2 (route intent + identity preview) while this literal stayed
 // at A2-R1, so a log could not be matched to the code that produced it. It moves with the file now.
-var TEMP_E3_CENSUS_BUILD_ = 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R6-R2';
+var TEMP_E3_CENSUS_BUILD_ = 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R6-R3';
 
 /** Read-only row reader. The Sheet object stays inside this function — the caller gets values, never a writer. */
 // R6-R3 §2 — the OPTIONAL third argument is a metrics sink. §2 requires the diagnostic to report how many
@@ -3885,5 +3885,526 @@ function CENSUS_r6r6r2Finish_(out) {
   out.writer_constructed = out.writer_constructed === true;
   CENSUS_log_('r6r6r2_verdict', out.census + ' ' + out.verdict + (out.stop_reason ? ' — ' + out.stop_reason : ''));
   CENSUS_log_('r6r6r2_db_writes', String(out.db_writes));
+  return out;
+}
+
+// ================================================================================================================
+// F1-7N-FC-1B-E3-R4-A2-R1-R6-R6-R3 — THE ROUTE B FORWARD COMPENSATING REPAIR TOOL.
+//
+// R6-R6-R2 stopped the page from writing a route nobody touched. It did not undo the one it already wrote.
+// Route B still holds `parcel` in a column no operator filled, at draft_version 2, with a K4 identity derived
+// to match. This is the tool that puts it back — FORWARD, as a third version, never by rewinding a second.
+//
+// THIS FILE NOW CONTAINS A WRITER. That is a change in kind, and everything below is shaped by it:
+//
+//   — Exactly ONE function can write, it is named so nobody runs it by accident, and it re-runs the whole
+//     preflight itself immediately before the call rather than trusting a verdict a human read minutes ago.
+//   — The payload is ECHOED FROM THE LIVE ROW, with one field replaced. A hand-typed header would write
+//     back whatever it happened to contain; an echo can only write back what is already there.
+//   — THE WRITER WRITES TO SpreadsheetApp.getActiveSpreadsheet(). This census reads through
+//     openById(prodExpectedDbId_()). If those two are not the same book, the preflight validates one database
+//     and the write lands in another. That is the first predicate, and it fails closed.
+//   — There is no retry. An exception or a lost acknowledgement is reported as UNKNOWN and the operator is
+//     sent to the readback, never back to the writer.
+//
+// K4 IS NOT A COLUMN. `ricK4GroupKey_` derives it from the header's dimensions at read time, and
+// `recommended_last_mile_delivery` is dimension 9 of 11. So 'restore the K4 key' requires writing nothing: the
+// key follows the last mile the moment the last mile is blank. The repair moves exactly ONE stored column.
+// ================================================================================================================
+
+var R6R6R3_TARGET_ = { allocation_draft_id: 'SADH-K4-A3872518', allocation_draft_line_id: 'SADL-K2-344FB2B2' };
+var R6R6R3_ACTOR_ = 'r6r6r3-compensating-repair';
+
+// The unauthorized AFTER: the state the repair is designed FOR, and refuses to run against anything else.
+var R6R6R3_B_UNAUTHORIZED_ = {
+  last_mile_delivery: 'parcel',
+  draft_version: '2',
+  k4_group_key: '|resus|us|amazon|inventory_replenishment|wh-tw-cn-factory-youxin|warehouse|wh-resus-us-3pl-amzlgs|air|parcel|',
+  updated_at: 'Sun Sep 06 2026 08:28:04 GMT+0800 (Taiwan Standard Time)',
+  line_updated_at: 'Sun Sep 06 2026 08:28:04 GMT+0800 (Taiwan Standard Time)'
+};
+// The state the repair produces. `draft_version` 3 is what the writer's own +1 yields; it is never sent.
+var R6R6R3_B_REPAIRED_ = {
+  last_mile_delivery: '',
+  draft_version: '3',
+  k4_group_key: '|resus|us|amazon|inventory_replenishment|wh-tw-cn-factory-youxin|warehouse|wh-resus-us-3pl-amzlgs|air||'
+};
+// Route A's authorized AFTER. Frozen here as the thing that must NOT move — in the preflight, in the write and
+// in the readback. Its timestamps are included: a repair that touched Route A would move them.
+var R6R6R3_A_AUTHORIZED_ = {
+  allocation_draft_id: 'SADH-K4-38523A90',
+  allocation_draft_line_id: 'SADL-K2-92B8BAD2',
+  last_mile_delivery: 'truck',
+  draft_version: '2',
+  k4_group_key: '|resus|us|amazon|inventory_replenishment|wh-tw-cn-factory-youxin|marketplace|amazon|sea_express|truck|',
+  expected_arrival: '',
+  updated_at: 'Sun Sep 06 2026 08:27:53 GMT+0800 (Taiwan Standard Time)',
+  line_updated_at: 'Sun Sep 06 2026 08:27:53 GMT+0800 (Taiwan Standard Time)'
+};
+// Route B's business content, from the R6-R6-R1-B1 production freeze — the capture taken while the row was
+// still correct. None of it may change, in either direction.
+var R6R6R3_B_BUSINESS_FIELDS_ = ['quantity', 'shipping_method', 'source_warehouse_id', 'destination_kind',
+  'destination_id', 'destination_marketplace', 'status', 'generation_type', 'ownership'];
+var R6R6R3_A_COMPARED_FIELDS_ = ['last_mile_delivery', 'draft_version', 'k4_group_key', 'expected_arrival',
+  'updated_at', 'line_updated_at'];
+
+function CENSUS_r6r6r3Frozen_B_() { return (R6R6_FROZEN_BEFORE_.other_rows || [])[0] || {}; }
+
+// A predicate is a sentence with an answer, not a line in a list. `preflight: []` said only 'nothing went
+// wrong', which is indistinguishable from 'nothing was checked' — and this round is authorizing a write.
+function CENSUS_r6r6r3P_(out, predicate, expected, observed, pass) {
+  out.predicates.push({ predicate: predicate, expected: expected, observed: observed, pass: !!pass });
+  if (pass) out.predicates_passed++; else out.predicates_failed++;
+  return !!pass;
+}
+function CENSUS_r6r6r3Eq_(field, expected, observed) {
+  var c = CENSUS_r6r6Cmp_(field, expected, observed);
+  return c.equal;
+}
+// The ACTIVE book — the one the writer writes to — must be the production database this census reads.
+function CENSUS_r6r6r3ActiveIsProd_() {
+  var out = { ok: false, detail: '' };
+  try {
+    var active = SpreadsheetApp.getActiveSpreadsheet();
+    if (!active) { out.detail = 'there is no active spreadsheet'; return out; }
+    if (typeof prodAssertDbTarget_ !== 'function') { out.detail = 'prodAssertDbTarget_ is unavailable'; return out; }
+    prodAssertDbTarget_(active, prodExpectedDbId_());
+    out.ok = true; out.detail = 'active spreadsheet IS the production database';
+  } catch (e) {
+    out.detail = 'the active spreadsheet is NOT the production database (' + CENSUS_str_(e && e.message) + ')';
+  }
+  return out;
+}
+function CENSUS_r6r6r3FindRow_(rows, headerId, lineId) {
+  var hits = [];
+  for (var i = 0; i < (rows || []).length; i++) {
+    if (CENSUS_str_(rows[i].allocation_draft_id) === CENSUS_str_(headerId) &&
+        CENSUS_str_(rows[i].allocation_draft_line_id) === CENSUS_str_(lineId)) hits.push(rows[i]);
+  }
+  return hits;
+}
+function CENSUS_r6r6r3CountBy_(rows, key, value) {
+  var n = 0;
+  for (var i = 0; i < (rows || []).length; i++) if (CENSUS_str_(rows[i][key]) === CENSUS_str_(value)) n++;
+  return n;
+}
+// Is production ALREADY in the repaired state? Computed on its own, because 'already done' and 'not ready'
+// are different answers and an operator who cannot tell them apart runs the writer twice.
+function CENSUS_r6r6r3AlreadyCompensated_(b) {
+  if (!b) return false;
+  return CENSUS_str_(b.last_mile_delivery) === R6R6R3_B_REPAIRED_.last_mile_delivery
+    && CENSUS_str_(b.draft_version) === R6R6R3_B_REPAIRED_.draft_version
+    && CENSUS_str_(b.k4_group_key).toLowerCase() === R6R6R3_B_REPAIRED_.k4_group_key.toLowerCase();
+}
+
+// ----------------------------------------------------------------------------------------------------------------
+// 1. PREFLIGHT — read-only, and every predicate answers out loud.
+// ----------------------------------------------------------------------------------------------------------------
+function RUN_R6R6R3_ROUTE_B_REPAIR_PREFLIGHT() {
+  var out = {
+    census: 'RUN_R6R6R3_ROUTE_B_REPAIR_PREFLIGHT',
+    build: TEMP_E3_CENSUS_BUILD_,
+    read_only: true, db_writes: 0, writer_constructed: false, writer_calls: 0,
+    submit_calls: 0, reservation_writes: 0, carrier_master_data_writes: 0,
+    target: R6R6R3_TARGET_,
+    predicates: [], predicates_passed: 0, predicates_failed: 0,
+    already_compensated: false,
+    verdict: 'STOP', stop_reason: ''
+  };
+  var frozenB = CENSUS_r6r6r3Frozen_B_();
+
+  // 0. THE BOOK THE WRITER WOULD WRITE TO.
+  var tgt = CENSUS_r6r6r3ActiveIsProd_();
+  CENSUS_r6r6r3P_(out, 'active_spreadsheet_is_production_db',
+    'the writer\'s active spreadsheet is the same book this census reads', tgt.detail, tgt.ok);
+
+  var res = RUN_R6R2_ROUTE_PROVENANCE();
+  if (res.error) {
+    CENSUS_r6r6r3P_(out, 'census_readable', 'the route census returns rows', 'error: ' + CENSUS_str_(res.error), false);
+    out.stop_reason = 'the census itself failed: ' + CENSUS_str_(res.error);
+    return CENSUS_r6r6r3FinishPre_(out);
+  }
+  out.db_writes = CENSUS_num_(res.db_writes) || 0;
+  out.writer_constructed = res.writer_constructed === true;
+  var rows = res.visible_route_rows || [];
+
+  // 1/2/3. THE TARGET EXISTS, EXACTLY ONCE, AND THE TWO IDS BELONG TOGETHER.
+  var headerHits = CENSUS_r6r6r3CountBy_(rows, 'allocation_draft_id', R6R6R3_TARGET_.allocation_draft_id);
+  var lineHits = CENSUS_r6r6r3CountBy_(rows, 'allocation_draft_line_id', R6R6R3_TARGET_.allocation_draft_line_id);
+  CENSUS_r6r6r3P_(out, 'target_header_exists_exactly_once', 1, headerHits, headerHits === 1);
+  CENSUS_r6r6r3P_(out, 'target_line_exists_exactly_once', 1, lineHits, lineHits === 1);
+  var pair = CENSUS_r6r6r3FindRow_(rows, R6R6R3_TARGET_.allocation_draft_id, R6R6R3_TARGET_.allocation_draft_line_id);
+  CENSUS_r6r6r3P_(out, 'header_and_line_ids_match_one_row', 1, pair.length, pair.length === 1);
+  var b = pair.length === 1 ? pair[0] : null;
+  out.already_compensated = CENSUS_r6r6r3AlreadyCompensated_(b);
+
+  // 4/5/6. THE UNAUTHORIZED STATE, EXACTLY.
+  CENSUS_r6r6r3P_(out, 'route_b_draft_version_is_2', R6R6R3_B_UNAUTHORIZED_.draft_version,
+    b ? CENSUS_str_(b.draft_version) : null, !!b && CENSUS_str_(b.draft_version) === R6R6R3_B_UNAUTHORIZED_.draft_version);
+  CENSUS_r6r6r3P_(out, 'route_b_last_mile_is_parcel', R6R6R3_B_UNAUTHORIZED_.last_mile_delivery,
+    b ? CENSUS_str_(b.last_mile_delivery) : null,
+    !!b && CENSUS_str_(b.last_mile_delivery).toLowerCase() === R6R6R3_B_UNAUTHORIZED_.last_mile_delivery);
+  CENSUS_r6r6r3P_(out, 'route_b_k4_is_the_parcel_key', R6R6R3_B_UNAUTHORIZED_.k4_group_key,
+    b ? CENSUS_str_(b.k4_group_key) : null,
+    !!b && CENSUS_str_(b.k4_group_key).toLowerCase() === R6R6R3_B_UNAUTHORIZED_.k4_group_key.toLowerCase());
+
+  // 7. THE TIMESTAMPS OF THE INCIDENT WRITE. Compared as INSTANTS, so a zone-name spelling is not a refusal.
+  ['updated_at', 'line_updated_at'].forEach(function (f) {
+    CENSUS_r6r6r3P_(out, 'route_b_' + f + '_matches_incident_after', R6R6R3_B_UNAUTHORIZED_[f],
+      b ? CENSUS_str_(b[f]) : null,
+      !!b && CENSUS_r6r6r3Eq_(f, R6R6R3_B_UNAUTHORIZED_[f], b[f]));
+  });
+
+  // 8. THE BUSINESS CONTENT, against the capture taken while the row was still correct.
+  R6R6R3_B_BUSINESS_FIELDS_.forEach(function (f) {
+    CENSUS_r6r6r3P_(out, 'route_b_' + f + '_unchanged', frozenB[f] == null ? '(not frozen)' : frozenB[f],
+      b ? CENSUS_str_(b[f]) : null,
+      !!b && frozenB[f] != null && CENSUS_r6r6r3Eq_(f, frozenB[f], b[f]));
+  });
+  CENSUS_r6r6r3P_(out, 'route_b_expected_arrival_blank', '', b ? CENSUS_str_(b.expected_arrival) : null,
+    !!b && CENSUS_str_(b.expected_arrival) === '');
+
+  // 9. ROUTE A, FIELD BY FIELD, INCLUDING ITS TIMESTAMPS.
+  var aPair = CENSUS_r6r6r3FindRow_(rows, R6R6R3_A_AUTHORIZED_.allocation_draft_id,
+    R6R6R3_A_AUTHORIZED_.allocation_draft_line_id);
+  var a = aPair.length === 1 ? aPair[0] : null;
+  CENSUS_r6r6r3P_(out, 'route_a_present_exactly_once', 1, aPair.length, aPair.length === 1);
+  R6R6R3_A_COMPARED_FIELDS_.forEach(function (f) {
+    CENSUS_r6r6r3P_(out, 'route_a_' + f + '_matches_authorized_after', R6R6R3_A_AUTHORIZED_[f],
+      a ? CENSUS_str_(a[f]) : null,
+      !!a && CENSUS_r6r6r3Eq_(f, R6R6R3_A_AUTHORIZED_[f], a[f]));
+  });
+
+  // 10. THE PLAN SHAPE.
+  var hCount = (res.sku_contributing_header_ids || []).length;
+  var lCount = (res.sku_contributing_line_ids || []).length;
+  CENSUS_r6r6r3P_(out, 'header_count_is_2', 2, hCount, hCount === 2);
+  CENSUS_r6r6r3P_(out, 'line_count_is_2', 2, lCount, lCount === 2);
+
+  // 11. NO CONFLICTING TARGET. After the repair Route B's identity becomes the blank-last-mile K4. If another
+  //     ACTIVE header already carries that identity, the repair would move this row onto an occupied one.
+  var conflicts = [];
+  for (var ci = 0; ci < rows.length; ci++) {
+    if (CENSUS_str_(rows[ci].allocation_draft_id) === R6R6R3_TARGET_.allocation_draft_id) continue;
+    if (CENSUS_str_(rows[ci].k4_group_key).toLowerCase() === R6R6R3_B_REPAIRED_.k4_group_key.toLowerCase()) {
+      conflicts.push(CENSUS_str_(rows[ci].allocation_draft_id));
+    }
+  }
+  CENSUS_r6r6r3P_(out, 'no_conflicting_target_for_the_repaired_identity', [], conflicts, conflicts.length === 0);
+
+  // 12. AND THIS READ WROTE NOTHING.
+  CENSUS_r6r6r3P_(out, 'writer_not_constructed', false, out.writer_constructed, out.writer_constructed === false);
+  CENSUS_r6r6r3P_(out, 'db_writes_is_zero', 0, out.db_writes, out.db_writes === 0);
+  CENSUS_r6r6r3P_(out, 'writer_calls_is_zero', 0, out.writer_calls, out.writer_calls === 0);
+
+  if (out.predicates_failed === 0) {
+    out.verdict = 'ROUTE_B_REPAIR_READY';
+  } else {
+    out.stop_reason = out.predicates_failed + ' predicate(s) failed: '
+      + out.predicates.filter(function (p) { return !p.pass; }).map(function (p) { return p.predicate; }).join(', ')
+      + (out.already_compensated ? '. NOTE: Route B is ALREADY in the repaired state — this is not a failure,'
+        + ' and the writer will report ALREADY_COMPENSATED with zero writes.' : '');
+  }
+  return CENSUS_r6r6r3FinishPre_(out);
+}
+function CENSUS_r6r6r3FinishPre_(out) {
+  out.read_only = true;
+  out.db_writes = CENSUS_num_(out.db_writes) || 0;
+  CENSUS_log_('r6r6r3_preflight', out.verdict + ' — passed ' + out.predicates_passed
+    + ' failed ' + out.predicates_failed);
+  out.predicates.forEach(function (p) {
+    if (!p.pass) CENSUS_log_('r6r6r3_preflight_failed', p.predicate + ': expected '
+      + JSON.stringify(p.expected) + ' observed ' + JSON.stringify(p.observed));
+  });
+  return out;
+}
+
+// ----------------------------------------------------------------------------------------------------------------
+// 2. EXECUTE — THE ONLY WRITER IN THIS FILE. One call, one row, one column.
+// ----------------------------------------------------------------------------------------------------------------
+function RUN_R6R6R3_ROUTE_B_REPAIR_EXECUTE_ONCE() {
+  var out = {
+    census: 'RUN_R6R6R3_ROUTE_B_REPAIR_EXECUTE_ONCE',
+    build: TEMP_E3_CENSUS_BUILD_,
+    read_only: false,
+    executed: false, writer_calls: 0, rows_written: 0,
+    submit_calls: 0, reservation_writes: 0, carrier_master_data_writes: 0,
+    target: R6R6R3_TARGET_,
+    preflight_verdict: null, predicates_passed: 0, predicates_failed: 0, failed_predicates: [],
+    payload: null, writer_response: null,
+    verdict: 'STOP', stop_reason: '',
+    next_action: ''
+  };
+
+  // 1. THE PREFLIGHT, RERUN HERE. Not a verdict someone read five minutes ago: the state it describes is the
+  //    state this call is about to write into, so it is measured now.
+  var pf;
+  try { pf = RUN_R6R6R3_ROUTE_B_REPAIR_PREFLIGHT(); }
+  catch (ePf) {
+    out.stop_reason = 'the preflight threw, so nothing was written: ' + CENSUS_str_(ePf && ePf.message);
+    out.next_action = 'Fix the preflight failure. Do NOT run this function again until it returns ROUTE_B_REPAIR_READY.';
+    return CENSUS_r6r6r3FinishExec_(out);
+  }
+  out.preflight_verdict = pf.verdict;
+  out.predicates_passed = pf.predicates_passed;
+  out.predicates_failed = pf.predicates_failed;
+  out.failed_predicates = (pf.predicates || []).filter(function (p) { return !p.pass; })
+    .map(function (p) { return { predicate: p.predicate, expected: p.expected, observed: p.observed }; });
+
+  // 2. ALREADY DONE IS NOT A FAILURE, AND IT IS NOT A REASON TO WRITE AGAIN. Checked before the readiness
+  //    verdict, because a repaired row fails 'last mile is parcel' by construction and an operator who reads
+  //    that as 'not ready' is one step from running the writer a second time.
+  if (pf.already_compensated === true) {
+    out.verdict = 'ALREADY_COMPENSATED';
+    out.stop_reason = 'Route B is already blank at draft_version 3 with the blank-last-mile K4. Nothing was written.';
+    out.next_action = 'Run RUN_R6R6R3_ROUTE_B_REPAIR_READBACK() to confirm. Do NOT run this writer again.';
+    return CENSUS_r6r6r3FinishExec_(out);
+  }
+  if (pf.verdict !== 'ROUTE_B_REPAIR_READY') {
+    out.stop_reason = 'the preflight did not return ROUTE_B_REPAIR_READY, so ZERO writes were attempted: '
+      + CENSUS_str_(pf.stop_reason);
+    out.next_action = 'Read failed_predicates. Nothing was written and nothing needs undoing.';
+    return CENSUS_r6r6r3FinishExec_(out);
+  }
+
+  // 3. THE PAYLOAD, ECHOED FROM THE LIVE ROW. Read from the SAME book the writer writes to, so what is sent
+  //    back is what is already stored — with one field replaced. A hand-typed header could carry a stale value
+  //    into a column nobody meant to touch; an echo cannot.
+  var ss, hSh, lSh, hFound, lFound, hRow, lRow;
+  try {
+    ss = SpreadsheetApp.getActiveSpreadsheet();
+    hSh = ss.getSheetByName('shipping_allocation_drafts');
+    lSh = ss.getSheetByName('shipping_allocation_draft_lines');
+    hFound = procurementFindRow_(hSh, 'allocation_draft_id', R6R6R3_TARGET_.allocation_draft_id);
+    lFound = procurementFindRow_(lSh, 'allocation_draft_line_id', R6R6R3_TARGET_.allocation_draft_line_id);
+    if (!hFound || !lFound) throw new Error('the target header or line row could not be located for the echo');
+    hRow = sadRowToObject_(hSh, hFound.row);
+    lRow = sadRowToObject_(lSh, lFound.row);
+  } catch (eEcho) {
+    out.stop_reason = 'could not read the live rows to build the echo, so nothing was written: '
+      + CENSUS_str_(eEcho && eEcho.message);
+    out.next_action = 'Nothing was written. Investigate the read failure before retrying.';
+    return CENSUS_r6r6r3FinishExec_(out);
+  }
+
+  var header = {
+    allocation_draft_id: R6R6R3_TARGET_.allocation_draft_id,
+    company: CENSUS_str_(hRow.company),
+    country: CENSUS_str_(hRow.country),
+    marketplace: CENSUS_str_(hRow.marketplace),
+    status: CENSUS_str_(hRow.status) || 'draft',
+    recommended_source_warehouse_id: CENSUS_str_(hRow.recommended_source_warehouse_id),
+    recommended_destination_warehouse_id: CENSUS_str_(hRow.recommended_destination_warehouse_id),
+    recommended_source_warehouse_code_snapshot: CENSUS_str_(hRow.recommended_source_warehouse_code_snapshot),
+    recommended_destination_warehouse_code_snapshot: CENSUS_str_(hRow.recommended_destination_warehouse_code_snapshot),
+    recommendation_group_no: CENSUS_str_(hRow.recommendation_group_no),
+    recommended_shipping_method: CENSUS_str_(hRow.recommended_shipping_method),
+    destination_marketplace: CENSUS_str_(hRow.destination_marketplace),
+    // THE ONE FIELD THIS ROUND EXISTS TO MOVE.
+    recommended_last_mile_delivery: '',
+    // The optimistic guard. 2 is what the incident left; the writer turns it into 3 on its own.
+    expected_draft_version: R6R6R3_B_UNAUTHORIZED_.draft_version,
+    created_by: R6R6R3_ACTOR_
+  };
+  // The line is echoed to its MINIMUM: an id, a SKU and a quantity is what sadAtomicValidateBatch_ requires of
+  // a manual line, and every field omitted here is a field the writer cannot touch. `expected_arrival` is
+  // deliberately absent — sadRegenerateLinePatch_ adopts it only when non-blank, so omitting it is what keeps
+  // 'do not change expected_arrival' true rather than merely intended.
+  var line = {
+    allocation_draft_line_id: R6R6R3_TARGET_.allocation_draft_line_id,
+    sku: CENSUS_str_(lRow.sku),
+    planned_qty: CENSUS_str_(lRow.planned_qty)
+  };
+  var payload = {
+    intent: 'UPDATE_EXISTING_ROUTE',
+    header: header,
+    lines: [line],
+    expected_draft_version: R6R6R3_B_UNAUTHORIZED_.draft_version
+    // create_idempotency_key is DELIBERATELY ABSENT: an UPDATE names its row and mints nothing.
+    // enforce_k2_grouping is absent: this is not a grouping operation.
+  };
+  out.payload = payload;
+
+  // 4. ONE CALL. The counter is incremented BEFORE the call, so a throw cannot leave it reading zero and
+  //    invite a second attempt.
+  if (out.writer_calls !== 0) {
+    out.stop_reason = 'a writer call was already recorded in this invocation; refusing a second.';
+    return CENSUS_r6r6r3FinishExec_(out);
+  }
+  out.writer_calls = 1;
+  var resp = null, threw = null;
+  try {
+    resp = handleUpsertShippingAllocationDraftAtomic_(payload);
+  } catch (eW) { threw = eW; }
+
+  // 5. CLASSIFY. There is no retry here, and there must never be one: this writer is not idempotent by key
+  //    (an UPDATE is guarded by a version it has just consumed), so a blind second attempt is a second write.
+  if (threw) {
+    out.verdict = 'ACK_UNKNOWN';
+    out.stop_reason = 'the writer threw AFTER being invoked, so whether it committed is unknown: '
+      + CENSUS_str_(threw && threw.message);
+    out.next_action = 'Run RUN_R6R6R3_ROUTE_B_REPAIR_READBACK(). Do NOT run this writer again — the readback'
+      + ' decides, and a second call would be a second write.';
+    return CENSUS_r6r6r3FinishExec_(out);
+  }
+  var parsed = null;
+  try {
+    parsed = JSON.parse(resp && resp.getContent ? resp.getContent()
+      : (typeof resp === 'string' ? resp : JSON.stringify(resp || {})));
+  } catch (eP) { parsed = null; }
+  out.writer_response = parsed;
+  if (!parsed) {
+    out.verdict = 'ACK_UNKNOWN';
+    out.stop_reason = 'the writer answered with something this tool could not parse, so whether it committed is unknown.';
+    out.next_action = 'Run RUN_R6R6R3_ROUTE_B_REPAIR_READBACK(). Do NOT run this writer again.';
+    return CENSUS_r6r6r3FinishExec_(out);
+  }
+  if (parsed.success !== true) {
+    // A typed refusal from 16_ carries zero_write; anything without it is not a proven zero-write.
+    var provenZero = (parsed.zero_write === true);
+    out.verdict = provenZero ? 'REFUSED_ZERO_WRITE' : 'ACK_UNKNOWN';
+    out.stop_reason = 'the writer refused: ' + CENSUS_str_(parsed.error || parsed.code);
+    out.next_action = provenZero
+      ? 'The refusal declares zero_write, so nothing changed. Fix the cause and re-run the PREFLIGHT first.'
+      : 'The refusal does NOT declare zero_write, so it is not proven. Run RUN_R6R6R3_ROUTE_B_REPAIR_READBACK().';
+    return CENSUS_r6r6r3FinishExec_(out);
+  }
+  // A REUSE means the writer found nothing to change — which, here, means the row was not what we measured.
+  if (parsed.reused === true) {
+    out.verdict = 'ACK_UNKNOWN';
+    out.stop_reason = 'the writer returned REUSED (zero write), which means the payload matched the stored row. '
+      + 'The repair did not apply.';
+    out.next_action = 'Run RUN_R6R6R3_ROUTE_B_REPAIR_READBACK() to see the current state. Do NOT run this writer again.';
+    return CENSUS_r6r6r3FinishExec_(out);
+  }
+  out.executed = true;
+  out.rows_written = 1;
+  out.verdict = 'ROUTE_B_COMPENSATION_WRITTEN';
+  out.next_action = 'Run RUN_R6R6R3_ROUTE_B_REPAIR_READBACK() to confirm. Do NOT run this writer again.';
+  return CENSUS_r6r6r3FinishExec_(out);
+}
+function CENSUS_r6r6r3FinishExec_(out) {
+  CENSUS_log_('r6r6r3_execute', out.verdict + ' — writer_calls ' + out.writer_calls
+    + ' executed ' + out.executed + (out.stop_reason ? ' — ' + out.stop_reason : ''));
+  CENSUS_log_('r6r6r3_execute_next', CENSUS_str_(out.next_action));
+  return out;
+}
+
+// ----------------------------------------------------------------------------------------------------------------
+// 3. READBACK — read-only, and it asks the DATABASE.
+//
+// THE UI IS NOT EVIDENCE HERE. After the repair the Execution Plan will very likely still SHOW `parcel` on
+// Route B, because `air` on this lane runs exactly one last mile and R6-R6-R2 kept that display while removing
+// its authority to be written. A screen showing parcel proves nothing about the column, which is the whole
+// reason this function reads rows instead.
+// ----------------------------------------------------------------------------------------------------------------
+function RUN_R6R6R3_ROUTE_B_REPAIR_READBACK() {
+  var out = {
+    census: 'RUN_R6R6R3_ROUTE_B_REPAIR_READBACK',
+    build: TEMP_E3_CENSUS_BUILD_,
+    read_only: true, db_writes: 0, writer_constructed: false, writer_calls: 0,
+    submit_calls: 0, reservation_writes: 0, carrier_master_data_writes: 0,
+    predicates: [], predicates_passed: 0, predicates_failed: 0,
+    ui_note: 'Route B may still DISPLAY parcel: it is the sole eligible last mile on this lane, so the cell is'
+      + ' filled for display. That display is not evidence about the stored column, and this verdict is.',
+    verdict: 'STOP', stop_reason: ''
+  };
+  var frozenB = CENSUS_r6r6r3Frozen_B_();
+  var res = RUN_R6R2_ROUTE_PROVENANCE();
+  if (res.error) {
+    CENSUS_r6r6r3P_(out, 'census_readable', 'the route census returns rows', 'error: ' + CENSUS_str_(res.error), false);
+    out.stop_reason = 'the census itself failed: ' + CENSUS_str_(res.error);
+    return CENSUS_r6r6r3FinishBack_(out);
+  }
+  out.db_writes = CENSUS_num_(res.db_writes) || 0;
+  out.writer_constructed = res.writer_constructed === true;
+  var rows = res.visible_route_rows || [];
+
+  // IDENTITY. The row must be the SAME row — not a replacement wearing its values.
+  var hHits = CENSUS_r6r6r3CountBy_(rows, 'allocation_draft_id', R6R6R3_TARGET_.allocation_draft_id);
+  var lHits = CENSUS_r6r6r3CountBy_(rows, 'allocation_draft_line_id', R6R6R3_TARGET_.allocation_draft_line_id);
+  CENSUS_r6r6r3P_(out, 'route_b_header_id_present_exactly_once', 1, hHits, hHits === 1);
+  CENSUS_r6r6r3P_(out, 'route_b_line_id_present_exactly_once', 1, lHits, lHits === 1);
+  var pair = CENSUS_r6r6r3FindRow_(rows, R6R6R3_TARGET_.allocation_draft_id, R6R6R3_TARGET_.allocation_draft_line_id);
+  CENSUS_r6r6r3P_(out, 'route_b_ids_still_paired', 1, pair.length, pair.length === 1);
+  var b = pair.length === 1 ? pair[0] : null;
+
+  // THE REPAIR ITSELF.
+  CENSUS_r6r6r3P_(out, 'route_b_last_mile_is_blank', '', b ? CENSUS_str_(b.last_mile_delivery) : null,
+    !!b && CENSUS_str_(b.last_mile_delivery) === '');
+  CENSUS_r6r6r3P_(out, 'route_b_draft_version_is_exactly_3', '3', b ? CENSUS_str_(b.draft_version) : null,
+    !!b && CENSUS_str_(b.draft_version) === '3');
+  CENSUS_r6r6r3P_(out, 'route_b_k4_is_the_blank_last_mile_key', R6R6R3_B_REPAIRED_.k4_group_key,
+    b ? CENSUS_str_(b.k4_group_key) : null,
+    !!b && CENSUS_str_(b.k4_group_key).toLowerCase() === R6R6R3_B_REPAIRED_.k4_group_key.toLowerCase());
+
+  // THE TIMESTAMPS ADVANCED. A repair is a write; if they did not move, no write landed and a version that
+  // reads 3 would have to be explained some other way.
+  ['updated_at', 'line_updated_at'].forEach(function (f) {
+    var before = CENSUS_r6r6r3TsMs_(R6R6R3_B_UNAUTHORIZED_[f]);
+    var now = b ? CENSUS_r6r6r3TsMs_(b[f]) : null;
+    CENSUS_r6r6r3P_(out, 'route_b_' + f + '_advanced_past_the_incident',
+      'later than ' + R6R6R3_B_UNAUTHORIZED_[f], b ? CENSUS_str_(b[f]) : null,
+      now !== null && before !== null && now > before);
+  });
+
+  // THE BUSINESS CONTENT DID NOT MOVE.
+  R6R6R3_B_BUSINESS_FIELDS_.forEach(function (f) {
+    CENSUS_r6r6r3P_(out, 'route_b_' + f + '_unchanged', frozenB[f] == null ? '(not frozen)' : frozenB[f],
+      b ? CENSUS_str_(b[f]) : null,
+      !!b && frozenB[f] != null && CENSUS_r6r6r3Eq_(f, frozenB[f], b[f]));
+  });
+  CENSUS_r6r6r3P_(out, 'route_b_expected_arrival_still_blank', '', b ? CENSUS_str_(b.expected_arrival) : null,
+    !!b && CENSUS_str_(b.expected_arrival) === '');
+
+  // ROUTE A DID NOT MOVE AT ALL — timestamps included, which is what proves the repair did not reach it.
+  var aPair = CENSUS_r6r6r3FindRow_(rows, R6R6R3_A_AUTHORIZED_.allocation_draft_id,
+    R6R6R3_A_AUTHORIZED_.allocation_draft_line_id);
+  var a = aPair.length === 1 ? aPair[0] : null;
+  CENSUS_r6r6r3P_(out, 'route_a_present_exactly_once', 1, aPair.length, aPair.length === 1);
+  R6R6R3_A_COMPARED_FIELDS_.forEach(function (f) {
+    CENSUS_r6r6r3P_(out, 'route_a_' + f + '_unchanged', R6R6R3_A_AUTHORIZED_[f],
+      a ? CENSUS_str_(a[f]) : null,
+      !!a && CENSUS_r6r6r3Eq_(f, R6R6R3_A_AUTHORIZED_[f], a[f]));
+  });
+
+  // THE PLAN SHAPE, AND NO SECOND ROW WEARING EITHER IDENTITY.
+  var hCount = (res.sku_contributing_header_ids || []).length;
+  var lCount = (res.sku_contributing_line_ids || []).length;
+  CENSUS_r6r6r3P_(out, 'header_count_still_2', 2, hCount, hCount === 2);
+  CENSUS_r6r6r3P_(out, 'line_count_still_2', 2, lCount, lCount === 2);
+  var dupes = [];
+  var seenH = {};
+  for (var di = 0; di < rows.length; di++) {
+    var k = CENSUS_str_(rows[di].allocation_draft_id) + '::' + CENSUS_str_(rows[di].allocation_draft_line_id);
+    if (seenH[k]) dupes.push(k); else seenH[k] = 1;
+  }
+  CENSUS_r6r6r3P_(out, 'no_duplicate_or_replacement_row', [], dupes, dupes.length === 0);
+
+  // AND THIS READ WROTE NOTHING.
+  CENSUS_r6r6r3P_(out, 'readback_db_writes_is_zero', 0, out.db_writes, out.db_writes === 0);
+  CENSUS_r6r6r3P_(out, 'readback_writer_not_constructed', false, out.writer_constructed, out.writer_constructed === false);
+
+  if (out.predicates_failed === 0) out.verdict = 'ROUTE_B_COMPENSATION_CONFIRMED';
+  else out.stop_reason = out.predicates_failed + ' predicate(s) failed: '
+    + out.predicates.filter(function (p) { return !p.pass; }).map(function (p) { return p.predicate; }).join(', ');
+  return CENSUS_r6r6r3FinishBack_(out);
+}
+// An instant, so a zone-name spelling is not a difference and 'later' is a comparison of moments.
+function CENSUS_r6r6r3TsMs_(v) {
+  var k = CENSUS_r6r6TsKey_(v);
+  if (k === '') return null;
+  var n = Number(k);
+  return isFinite(n) ? n : null;
+}
+function CENSUS_r6r6r3FinishBack_(out) {
+  out.read_only = true;
+  out.db_writes = CENSUS_num_(out.db_writes) || 0;
+  CENSUS_log_('r6r6r3_readback', out.verdict + ' — passed ' + out.predicates_passed
+    + ' failed ' + out.predicates_failed);
+  out.predicates.forEach(function (p) {
+    if (!p.pass) CENSUS_log_('r6r6r3_readback_failed', p.predicate + ': expected '
+      + JSON.stringify(p.expected) + ' observed ' + JSON.stringify(p.observed));
+  });
   return out;
 }

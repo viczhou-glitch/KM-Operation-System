@@ -752,11 +752,15 @@ eq((INDEX.match(/fc1be3r4a2r1r6r6r2-rowisolation-20260906/g) || []).length, 21,
   'D1a and every one of the 21 script/style references carries it');
 eq((INDEX.match(/fc1be3r4a2r1r6r6-compactrecon-20260905/g) || []).length, 0,
   'D1b with none left on the previous token');
-eq((CENSUS.match(/var TEMP_E3_CENSUS_BUILD_ = '([^']+)'/) || [])[1], 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R6-R2',
-  'D2  the diagnostic declares this round');
+// R6-R6-R3 — THIS WAS AN EQUALITY WITH NOW, and the first later round to touch the file broke it. The
+// claim this suite actually owns is that the diagnostic changed in R6-R6-R2 OR LATER; pinning the literal
+// made every future round's stamp bump look like a regression in THIS round's evidence.
+var _d2Declared = (CENSUS.match(/var TEMP_E3_CENSUS_BUILD_ = '([^']+)'/) || [])[1];
+ok(RO.OWNER_STAMPS.indexOf(_d2Declared) >= RO.OWNER_STAMPS.indexOf('F1-7N-FC-1B-E3-R4-A2-R1-R6-R6-R2'),
+  'D2  the diagnostic declares R6-R6-R2 or a later round (' + _d2Declared + ')');
 ok(RO.OWNER_STAMPS.indexOf('F1-7N-FC-1B-E3-R4-A2-R1-R6-R6-R2') !== -1,
-  'D2a and the ledger records it');
-ok(RO.BUILD_STAMP_RE.test('F1-7N-FC-1B-E3-R4-A2-R1-R6-R6-R2'), 'D2b as a well-formed stamp');
+  'D2a and the ledger still records the round this suite belongs to');
+ok(RO.BUILD_STAMP_RE.test(_d2Declared), 'D2b and whatever it declares is a well-formed stamp');
 // The BEFORE was not re-captured, so the capture stamp must NOT march to this round.
 ok(/captured_for_build: 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R6-R1-B1'/.test(CENSUS),
   'D3  the frozen capture still names the build it was CAPTURED for — a stamp records an event, not the present');

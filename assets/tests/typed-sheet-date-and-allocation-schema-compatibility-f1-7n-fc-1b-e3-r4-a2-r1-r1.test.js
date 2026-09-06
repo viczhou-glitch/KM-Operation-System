@@ -595,9 +595,21 @@ ok(/TEMP_FCROLL_DRY_RUN = true/.test(read('assets/tools/apps-script-diagnostics/
   'H3  the 2027 rollover migration is still unrun');
 ok(/CENSUS_log_\('db_writes', 0\)/.test(TEMP) && /CENSUS_log_\('writer_constructed', false\)/.test(TEMP),
   'H4  the census still declares zero writes and no writer');
-ok(!/handleUpsertShippingAllocationDraftAtomic_|\.setValue\(|\.appendRow\(/.test(
-  TEMP.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/[^\n]*/g, '$1 ')),
-  'H5  and constructs no writer and makes no mutation call');
+// R6-R6-R3 — THIS GUARANTEE WAS ABSOLUTE AND IS NOW BOUNDED, DELIBERATELY. The file gained a writer:
+// RUN_R6R6R3_ROUTE_B_REPAIR_EXECUTE_ONCE compensates the route the 2026-09-06 incident wrote without
+// authorization. 'The census never calls the writer' is therefore false, and an assertion that keeps saying
+// it would have to be deleted rather than corrected. What still holds, and is checked instead: there is
+// EXACTLY ONE such call, it lives in EXACTLY ONE named function, and no entry point writes a cell directly.
+var _h5Stripped = TEMP.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/[^\n]*/g, '$1 ');
+eq((_h5Stripped.match(/handleUpsertShippingAllocationDraftAtomic_\s*\(/g) || []).length, 1,
+  'H5  the census contains EXACTLY ONE call to the atomic writer');
+var _h5From = TEMP.indexOf('function RUN_R6R6R3_ROUTE_B_REPAIR_EXECUTE_ONCE(');
+var _h5To = TEMP.indexOf('function CENSUS_r6r6r3FinishExec_(');
+ok(_h5From > 0 && _h5To > _h5From
+  && /handleUpsertShippingAllocationDraftAtomic_\s*\(/.test(TEMP.slice(_h5From, _h5To)),
+  'H5a and it is inside RUN_R6R6R3_ROUTE_B_REPAIR_EXECUTE_ONCE, the only function allowed to have it');
+ok(!/\.setValue\(|\.appendRow\(|\.deleteRow\(|\.clearContent\(/.test(_h5Stripped),
+  'H5b and no entry point writes a cell directly — every mutation goes through 16_ under its own lock');
 ok(/CENSUS_log_\('allocation_schema'/.test(TEMP), 'H6  the census reports the live allocation schema (§10)');
 ok(/CENSUS_log_\('freshness_reason'/.test(TEMP) && /hErr && hErr\.freshness/.test(TEMP),
   'H7  and reads the freshness out of a REFUSAL, not only a success');

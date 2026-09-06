@@ -561,9 +561,22 @@ ok(/TEMP_FCROLL_DRY_RUN = true/.test(read('assets/tools/apps-script-diagnostics/
   'J3  the 2027 rollover is still unrun');
 ok(/CENSUS_log_\('db_writes', 0\)/.test(TEMP) && /CENSUS_log_\('writer_constructed', false\)/.test(TEMP),
   'J4  the census still declares zero writes and no writer');
-ok(!/handleUpsertShippingAllocationDraftAtomic_/.test(
-  TEMP.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/[^\n]*/g, '$1 ')),
-  'J5  and constructs no writer');
+// R6-R6-R3 — THIS GUARANTEE WAS ABSOLUTE AND IS NOW BOUNDED, DELIBERATELY. The file gained a writer:
+// RUN_R6R6R3_ROUTE_B_REPAIR_EXECUTE_ONCE compensates the route the 2026-09-06 incident wrote without
+// authorization. 'The census never calls the writer' is therefore false, and an assertion that keeps
+// saying it would have to be deleted rather than corrected. The property worth keeping is the one that
+// still holds: there is EXACTLY ONE such call, it lives in EXACTLY ONE named function, and no entry
+// point writes a cell directly.
+var _j5Stripped = TEMP.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/[^\n]*/g, '$1 ');
+eq((_j5Stripped.match(/handleUpsertShippingAllocationDraftAtomic_\s*\(/g) || []).length, 1,
+  'J5  the census contains EXACTLY ONE call to the atomic writer');
+var _j5ExecFrom = TEMP.indexOf('function RUN_R6R6R3_ROUTE_B_REPAIR_EXECUTE_ONCE(');
+var _j5ExecTo = TEMP.indexOf('function CENSUS_r6r6r3FinishExec_(');
+ok(_j5ExecFrom > 0 && _j5ExecTo > _j5ExecFrom
+  && /handleUpsertShippingAllocationDraftAtomic_\s*\(/.test(TEMP.slice(_j5ExecFrom, _j5ExecTo)),
+  'J5a and it is inside RUN_R6R6R3_ROUTE_B_REPAIR_EXECUTE_ONCE, which is the only function allowed to have it');
+ok(!/\.setValue\(|\.appendRow\(|\.deleteRow\(|\.clearContent\(/.test(_j5Stripped),
+  'J5b and no entry point writes a cell directly — every mutation goes through 16_ under its own lock');
 ok(/CENSUS_log_\('route_intent_that_generation_would_use'/.test(TEMP),
   'J6  the census reports the intent production generation would declare (§11)');
 ok(/CENSUS_log_\('deterministic_identity_preview'/.test(TEMP), 'J6a and a deterministic identity preview');
