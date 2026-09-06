@@ -6382,8 +6382,671 @@ function RUN_R6R7_CONTROLLED_AI_PLAN_READBACK() {
 var R6R7_REQUIRED_EXPORT_ = {
   RUN_R6R7_CONTROLLED_AI_PLAN_PREFLIGHT: ['production_path', 'parity'],
   RUN_R6R7_RECOMMENDATION_AUTHORITY_CENSUS: ['suggested_qty', 'disputed_value_provenance', 'current_run'],
-  RUN_R6R7_CONTROLLED_AI_PLAN_READBACK: ['counts']
+  RUN_R6R7_CONTROLLED_AI_PLAN_READBACK: ['counts'],
+  // R6-R7-R3. The manifest's verdict rests on what it FROZE; a READY_TO_AUTHORIZE that does not carry the
+  // baseline is an authorization nobody can check afterwards. The readback's rests on what it COMPARED.
+  RUN_R6R7_CONTROLLED_NO_ACTION_ACTIVATION_MANIFEST: ['frozen_before', 'production_path', 'deployment'],
+  RUN_R6R7_CONTROLLED_NO_ACTION_READBACK: ['counts', 'routes_observed']
 };
+
+// ================================================================================================================
+// F1-7N-FC-1B-E3-R4-A2-R1-R6-R7-R3 — THE FIRST CONTROLLED NO-ACTION ACTIVATION.
+//
+// Everything before this round proved what a generation WOULD do. This one is about the sentence a person
+// has to be able to sign: 'press it once, and here is exactly what must be true before, and exactly what
+// must be identical after.'
+//
+// A BASELINE A READBACK RECOMPUTES CANNOT DETECT A CHANGE. Whatever it finds becomes what it expected. So
+// the BEFORE is frozen into a constant BY A PERSON, from the manifest's own printed block, and the readback
+// refuses to run against an unfrozen one. That refusal is the feature: a readback that cheerfully compares
+// nothing to nothing would report CONFIRMED after a write.
+//
+// AND A GENERATION REQUEST IS NOT A DATABASE WRITE. The transport records one mutation REQUEST because the
+// operator asked the server to consider generating; the server's answer is that nothing needed writing.
+// mutation_requests 1 beside db_writes 0 is the CORRECT shape of a no-action, and reading the first number
+// as the second is how a correct finish gets rolled back.
+// ================================================================================================================
+
+/** The frozen BEFORE. The literal fields are already frozen by section 0 and every earlier round; the null
+ *  ones are the LIVE facts only a run can supply, and the manifest prints the exact block to paste here.
+ *  While any of them is null the readback STOPS with BASELINE_NOT_FROZEN — it will not prove stillness
+ *  against a baseline it does not have. */
+var R6R7_NO_ACTION_BEFORE_ = {
+  frozen_by: null,                 // who pasted it, and when they ran the manifest
+  frozen_at: null,
+  calculation_run_id: null,
+  calculation_date: null,
+  calculated_at: null,
+  calculation_status: null,
+  freshness_state: null,
+  windows: null,                   // { d18, d30, d45, d90 } as stored
+  recommended_qty: null,
+  qualifying_active_planned_qty: null,
+  residual_qty: null,
+  route_a_fingerprint: null,
+  route_a_updated_at: null,
+  route_a_line_updated_at: null,
+  route_b_fingerprint: null,
+  route_b_updated_at: null,
+  route_b_line_updated_at: null,
+  manual_header_ids: null,
+  manual_line_ids: null,
+  active_ai_headers: null,
+  active_ai_lines: null,
+  reservation_row_count: null,
+  manual_planned_total: R6R7_SET_BEFORE_.current_plan_total,   // 520, frozen since section 0
+  route_a: R6R7_MANUAL_ROUTES_[0],
+  route_b: R6R7_MANUAL_ROUTES_[1]
+};
+var R6R7_BEFORE_REQUIRED_ = ['frozen_at', 'calculation_run_id', 'calculation_date', 'calculation_status',
+  'freshness_state', 'recommended_qty', 'qualifying_active_planned_qty', 'residual_qty',
+  'route_a_fingerprint', 'route_a_updated_at', 'route_a_line_updated_at',
+  'route_b_fingerprint', 'route_b_updated_at', 'route_b_line_updated_at',
+  'active_ai_headers', 'active_ai_lines'];
+
+/** FNV-1a, 32 bits, hex. Deterministic, dependency-free and byte-stable: the same row produces the same
+ *  string on any deployment, which is the only property a fingerprint needs here. It is not a security
+ *  hash and is not used as one. */
+function CENSUS_fp_(s) {
+  var h = 0x811c9dc5, str = String(s == null ? '' : s);
+  for (var i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i) & 0xff;
+    h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
+    if (str.charCodeAt(i) > 0xff) {
+      h ^= (str.charCodeAt(i) >> 8) & 0xff;
+      h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
+    }
+  }
+  return ('0000000' + h.toString(16)).slice(-8);
+}
+
+// The fields a route's identity and its business meaning are made of, in a FIXED order. Order is part of the
+// contract: a fingerprint over an unordered object is not reproducible.
+var R6R7_FP_FIELDS_ = ['allocation_draft_id', 'allocation_draft_line_id', 'status', 'line_status',
+  'draft_version', 'quantity', 'shipping_method', 'last_mile_delivery', 'source_warehouse_id',
+  'destination_marketplace', 'k4_group_key', 'recommendation_group_no', 'generation_type',
+  'generation_run_id', 'ownership', 'updated_by', 'updated_at', 'line_updated_at'];
+
+function CENSUS_r6r7RouteFingerprint_(row) {
+  if (!row) return null;
+  var parts = R6R7_FP_FIELDS_.map(function (f) {
+    return f + '=' + CENSUS_str_(row[f] === undefined ? '' : row[f]);
+  });
+  return CENSUS_fp_(parts.join('\u0001'));
+}
+
+/** A bounded row count for a table this census does not otherwise read. Used for `reservations`, where the
+ *  question is only ever 'did one appear?' — so a count is the whole answer and the columns do not matter.
+ *  Returns null with a reason rather than 0 when the sheet cannot be read: a table we could not open is not
+ *  a table with nothing in it. */
+function CENSUS_r6r7RowCount_(ss, name) {
+  try {
+    var sh = ss.getSheetByName(name);
+    if (!sh) return { table: name, row_count: null, reason: 'SHEET_NOT_PRESENT' };
+    var last = sh.getLastRow();
+    return { table: name, row_count: last > 0 ? (last - 1) : 0, reason: null };
+  } catch (e) {
+    return { table: name, row_count: null, reason: 'UNREADABLE: ' + CENSUS_str_(e && e.message) };
+  }
+}
+
+/** The deployment contract, read from 63_'s own reporter rather than restated. UNAVAILABLE when 63_ is not
+ *  synced, which is not the same as uniform. */
+function CENSUS_r6r7Deployment_() {
+  if (typeof sysModuleBuildStamps_ !== 'function') {
+    return { available: false, reason: 'SYSTEM_HEALTH_NOT_SYNCED: sysModuleBuildStamps_ is absent',
+      deployment_build: null, mixed_deployment: null, stale_modules: null, absent_modules: null };
+  }
+  try {
+    var d = sysModuleBuildStamps_();
+    return { available: true, reason: null, deployment_build: d.deployment_build,
+      mixed_deployment: d.mixed_deployment === true,
+      stale_modules: d.stale_modules || [], absent_modules: d.absent_modules || [] };
+  } catch (e) {
+    return { available: false, reason: 'DEPLOYMENT_CONTRACT_THREW: ' + CENSUS_str_(e && e.message),
+      deployment_build: null, mixed_deployment: null, stale_modules: null, absent_modules: null };
+  }
+}
+
+// ================================================================================================================
+// R6-R7-R3 — THE MANIFEST A PERSON AUTHORIZES FROM. Read-only, no arguments, one hard-coded scope.
+//
+// It re-reads everything rather than trusting a previous run's numbers, freezes what it read, evaluates every
+// condition that must hold, and answers READY_TO_AUTHORIZE or STOP. It does not flip the flag, cannot flip the
+// flag, and constructs no writer.
+// ================================================================================================================
+function RUN_R6R7_CONTROLLED_NO_ACTION_ACTIVATION_MANIFEST() {
+  var out = {
+    census: 'RUN_R6R7_CONTROLLED_NO_ACTION_ACTIVATION_MANIFEST',
+    build: TEMP_E3_CENSUS_BUILD_,
+    read_only: true, db_writes: 0, writer_constructed: false, writer_calls: 0,
+    submit_calls: 0, route_save_calls: 0, reservation_writes: 0, carrier_master_data_writes: 0,
+    flag_flipped_this_round: false, generation_called_this_round: false,
+    scope: R6R7_SCOPE_,
+    predicates: [], predicates_passed: 0, predicates_failed: 0,
+    deployment: null, flag: null, allowlist: null,
+    frozen_before: null, freeze_paste_block: null,
+    production_path: null, parity: null,
+    activation_steps: null, rollback: null, browser_audit: null,
+    proof_complete: false, proof_missing: ['NOT_EVALUATED'],
+    verdict: 'STOP', stop_reason: ''
+  };
+  function P(name, expected, observed, pass) { return CENSUS_r6r6r3P_(out, name, expected, observed, pass); }
+
+  // ---- 1. THE SCOPE IS FROZEN, AND IT IS ONE SKU. ----------------------------------------------------------
+  P('scope_is_the_one_frozen_sku', { company: 'ResUS', country: 'US', marketplace: 'Amazon', sku: 'CO1100-R' },
+    R6R7_SCOPE_,
+    CENSUS_str_(R6R7_SCOPE_.company) === 'ResUS' && CENSUS_str_(R6R7_SCOPE_.country) === 'US'
+      && CENSUS_str_(R6R7_SCOPE_.marketplace) === 'Amazon' && CENSUS_str_(R6R7_SCOPE_.sku) === 'CO1100-R');
+
+  // ---- 2. THE DEPLOYMENT. A build that is not the one every preflight was measured on is a different
+  //         system, and none of the evidence transfers to it.
+  out.deployment = CENSUS_r6r7Deployment_();
+  P('deployment_contract_is_readable', true, out.deployment.available, out.deployment.available === true);
+  P('deployment_build_is_the_measured_one', R6R7_ACTIVATION_BUILD_, out.deployment.deployment_build,
+    out.deployment.deployment_build === R6R7_ACTIVATION_BUILD_);
+  P('deployment_is_not_mixed', false, out.deployment.mixed_deployment, out.deployment.mixed_deployment === false);
+  P('no_stale_modules', [], out.deployment.stale_modules,
+    !!out.deployment.stale_modules && out.deployment.stale_modules.length === 0);
+
+  // ---- 3. THE TWO GATES. The flag must still be OFF: this manifest authorizes flipping it, and a flag that
+  //         is already on means somebody flipped it outside this procedure.
+  var flagVal = null;
+  try { flagVal = (typeof inventoryAiPlanDbGenerationEnabled_ === 'function') ? inventoryAiPlanDbGenerationEnabled_() : null; } catch (eF) { flagVal = null; }
+  var allow = null;
+  try { allow = (typeof INVENTORY_AI_PLAN_ACTIVATION_ALLOWLIST_ !== 'undefined') ? INVENTORY_AI_PLAN_ACTIVATION_ALLOWLIST_ : null; } catch (eA) { allow = null; }
+  out.flag = { name: 'INVENTORY_AI_PLAN_DB_GENERATION_ENABLED_', value: flagVal,
+    must_be_now: false, will_be_after_step_1: true, must_be_after_step_11: false };
+  var exact = !!allow && allow.length === 1 && CENSUS_str_(allow[0].company) === R6R7_SCOPE_.company
+    && CENSUS_str_(allow[0].country) === R6R7_SCOPE_.country
+    && CENSUS_str_(allow[0].marketplace) === R6R7_SCOPE_.marketplace
+    && CENSUS_str_(allow[0].sku) === R6R7_SCOPE_.sku;
+  out.allowlist = { entries: allow, is_exactly_the_frozen_scope: exact,
+    forbidden_shapes: 'a marketplace-only, company-only, country-only or wildcard entry. Every one of the'
+      + ' four axes must be a literal value; a blank is a wildcard and widens the list.' };
+  P('flag_is_still_false', false, flagVal, flagVal === false);
+  P('allowlist_is_exactly_the_one_frozen_scope', 1, allow ? allow.length : null, exact);
+  var wild = !allow ? [] : allow.filter(function (e) {
+    return !CENSUS_str_(e.company) || !CENSUS_str_(e.country) || !CENSUS_str_(e.marketplace)
+      || !CENSUS_str_(e.sku) || /^all(_sites)?$/i.test(CENSUS_str_(e.marketplace));
+  });
+  P('no_wildcard_or_partial_allowlist_entry', [], wild, wild.length === 0);
+
+  // ---- 4. THE PRODUCTION ANSWER, from 61_'s own decision builder. ------------------------------------------
+  out.production_path = CENSUS_r6r7ProductionPath_();
+  var pp = out.production_path || {};
+  P('production_path_is_available', true, pp.available, pp.available === true);
+  P('production_outcome_is_no_action', 'AI_PLAN_NO_ACTION', pp.outcome, pp.outcome === 'AI_PLAN_NO_ACTION');
+  P('production_code_is_no_replenishment_required', 'NO_REPLENISHMENT_REQUIRED', pp.code,
+    pp.code === 'NO_REPLENISHMENT_REQUIRED');
+  P('production_would_not_write', false, pp.would_write, pp.would_write === false);
+  P('writer_would_not_be_reached', false, pp.writer_reached, pp.writer_reached === false);
+  P('recommended_qty_is_zero', 0, pp.recommended_qty, pp.recommended_qty === 0);
+  P('residual_qty_is_zero', 0, pp.residual_qty, pp.residual_qty === 0);
+  P('qualifying_active_planned_qty_is_520', R6R7_SET_BEFORE_.current_plan_total,
+    pp.qualifying_active_planned_qty,
+    pp.qualifying_active_planned_qty === R6R7_SET_BEFORE_.current_plan_total);
+
+  // ---- 5. THE PREFLIGHT, RUN AGAIN. Not trusted from a previous session — an authorization is only as good
+  //         as the state at the moment it is given.
+  var pre = CENSUS_quiet_('RUN_R6R7_CONTROLLED_AI_PLAN_PREFLIGHT',
+    function () { return RUN_R6R7_CONTROLLED_AI_PLAN_PREFLIGHT(); });
+  P('preflight_is_ready_no_action', 'READY_NO_ACTION', pre.verdict, pre.verdict === 'READY_NO_ACTION');
+  P('preflight_has_no_failed_predicate', 0, pre.predicates_failed, pre.predicates_failed === 0);
+  P('preflight_proof_is_complete', true, pre.proof_complete, pre.proof_complete === true);
+  P('preflight_export_is_complete', true, pre.export_complete, pre.export_complete === true);
+  out.parity = pre.parity || null;
+  P('wrapper_and_production_agree', true, out.parity ? out.parity.agree : null,
+    !!out.parity && out.parity.agree === true);
+  P('parity_says_production_would_not_write', false,
+    out.parity ? out.parity.production_would_write : null,
+    !!out.parity && out.parity.production_would_write === false);
+
+  // ---- 6. THE RECOMMENDATION, RE-READ AND FROZEN. -----------------------------------------------------------
+  var rec = CENSUS_quiet_('RUN_R6R7_RECOMMENDATION_AUTHORITY_CENSUS',
+    function () { return RUN_R6R7_RECOMMENDATION_AUTHORITY_CENSUS(); });
+  P('recommendation_authority_established', 'RECOMMENDATION_AUTHORITY_ESTABLISHED', rec.verdict,
+    rec.verdict === 'RECOMMENDATION_AUTHORITY_ESTABLISHED');
+  var cr = rec.current_run || {};
+  var fr = (pp.authority && pp.authority.current_run) || {};
+  var wins = (rec.recommendation_window && rec.recommendation_window.all_windows) || [];
+  var byWin = {};
+  wins.forEach(function (w) { byWin[CENSUS_str_(w.window)] = w.suggested_qty; });
+  P('recommendation_is_ready', 'READY', cr.calculation_status, CENSUS_str_(cr.calculation_status) === 'READY');
+  P('every_window_is_a_stored_finite_zero', 'four finite zeros', byWin,
+    wins.length > 0 && wins.every(function (w) { return w.suggested_qty === 0; }));
+  P('freshness_is_current', 'a current snapshot', fr.freshness_state,
+    CENSUS_str_(fr.freshness_state).indexOf('CURRENT') === 0);
+
+  // ---- 7. THE ROUTES AND THE COUNTS, RE-READ AND FINGERPRINTED. ---------------------------------------------
+  var prov = CENSUS_quiet_('RUN_R6R2_ROUTE_PROVENANCE', function () { return RUN_R6R2_ROUTE_PROVENANCE(); });
+  if (prov.error) {
+    P('route_census_readable', 'rows', 'error: ' + CENSUS_str_(prov.error), false);
+    out.stop_reason = 'the route census failed: ' + CENSUS_str_(prov.error);
+    return CENSUS_r6r7Finish_(out);
+  }
+  out.db_writes = CENSUS_num_(prov.db_writes) || 0;
+  out.writer_constructed = prov.writer_constructed === true;
+  var rows = prov.visible_route_rows || [];
+  var snap = {};
+  R6R7_MANUAL_ROUTES_.forEach(function (m) {
+    var hits = CENSUS_r6r6r4Find_(rows, m.allocation_draft_id, m.allocation_draft_line_id);
+    var r = hits.length === 1 ? hits[0] : null;
+    snap[m.label] = r;
+    P('route_' + m.label + '_present_exactly_once', 1, hits.length, hits.length === 1);
+    P('route_' + m.label + '_version_is_frozen', m.draft_version, r ? CENSUS_str_(r.draft_version) : null,
+      !!r && CENSUS_str_(r.draft_version) === m.draft_version);
+    P('route_' + m.label + '_last_mile_is_frozen', m.last_mile_delivery,
+      r ? CENSUS_str_(r.last_mile_delivery) : null,
+      !!r && CENSUS_str_(r.last_mile_delivery) === m.last_mile_delivery);
+    P('route_' + m.label + '_quantity_is_frozen', m.quantity, r ? CENSUS_num_(r.quantity) : null,
+      !!r && CENSUS_num_(r.quantity) === m.quantity);
+    P('route_' + m.label + '_is_manual', 'no run id, not system_generated',
+      r ? (CENSUS_str_(r.generation_type) + ' / ' + (CENSUS_str_(r.generation_run_id) || '(none)')) : null,
+      !!r && CENSUS_low_(r.generation_type) !== 'system_generated' && CENSUS_str_(r.generation_run_id) === '');
+  });
+  var total = CENSUS_num_(prov.census_current_plan_total);
+  P('manual_planned_total_is_520', R6R7_SET_BEFORE_.current_plan_total, total,
+    total === R6R7_SET_BEFORE_.current_plan_total);
+  var manualIds = R6R7_MANUAL_ROUTES_.map(function (m) { return m.allocation_draft_id; });
+  var aiRows = rows.filter(function (r) { return manualIds.indexOf(CENSUS_str_(r.allocation_draft_id)) === -1; });
+  P('no_active_ai_row_exists_yet', 0, aiRows.length, aiRows.length === 0);
+
+  var ssR = null;
+  try { ssR = SpreadsheetApp.openById(prodExpectedDbId_()); } catch (eS) { ssR = null; }
+  var reservations = ssR ? CENSUS_r6r7RowCount_(ssR, 'reservations')
+    : { table: 'reservations', row_count: null, reason: 'DB_NOT_OPENED' };
+
+  out.frozen_before = {
+    // The canonical timestamp authority, or NOTHING. A clock read here would be a fabricated data value on
+    // the one field that says when the baseline was taken, and the readback would compare against it as
+    // though a person had frozen it.
+    frozen_at: (typeof procurementTimestamp_ === 'function') ? procurementTimestamp_() : null,
+    calculation_run_id: cr.calculation_run_id || null,
+    calculation_date: cr.calculation_date || fr.calculation_date || null,
+    calculated_at: cr.calculated_at || null,
+    calculation_status: cr.calculation_status || null,
+    freshness_state: fr.freshness_state || null,
+    windows: byWin,
+    recommended_qty: pp.recommended_qty === undefined ? null : pp.recommended_qty,
+    qualifying_active_planned_qty: pp.qualifying_active_planned_qty === undefined
+      ? null : pp.qualifying_active_planned_qty,
+    residual_qty: pp.residual_qty === undefined ? null : pp.residual_qty,
+    route_a_fingerprint: CENSUS_r6r7RouteFingerprint_(snap.A),
+    route_a_updated_at: snap.A ? CENSUS_str_(snap.A.updated_at) : null,
+    route_a_line_updated_at: snap.A ? CENSUS_str_(snap.A.line_updated_at) : null,
+    route_b_fingerprint: CENSUS_r6r7RouteFingerprint_(snap.B),
+    route_b_updated_at: snap.B ? CENSUS_str_(snap.B.updated_at) : null,
+    route_b_line_updated_at: snap.B ? CENSUS_str_(snap.B.line_updated_at) : null,
+    manual_header_ids: (prov.sku_contributing_header_ids || []).slice().sort(),
+    manual_line_ids: (prov.sku_contributing_line_ids || []).slice().sort(),
+    manual_planned_total: total,
+    active_ai_headers: aiRows.length,
+    active_ai_lines: aiRows.length,
+    reservation_row_count: reservations.row_count,
+    reservation_read: reservations
+  };
+  // THE BLOCK A PERSON PASTES. A readback that recomputed this would compare a state with itself.
+  out.freeze_paste_block = 'Paste these into R6R7_NO_ACTION_BEFORE_ in this file BEFORE pressing Generate: '
+    + JSON.stringify({
+      frozen_at: out.frozen_before.frozen_at,
+      calculation_run_id: out.frozen_before.calculation_run_id,
+      calculation_date: out.frozen_before.calculation_date,
+      calculated_at: out.frozen_before.calculated_at,
+      calculation_status: out.frozen_before.calculation_status,
+      freshness_state: out.frozen_before.freshness_state,
+      windows: out.frozen_before.windows,
+      recommended_qty: out.frozen_before.recommended_qty,
+      qualifying_active_planned_qty: out.frozen_before.qualifying_active_planned_qty,
+      residual_qty: out.frozen_before.residual_qty,
+      route_a_fingerprint: out.frozen_before.route_a_fingerprint,
+      route_a_updated_at: out.frozen_before.route_a_updated_at,
+      route_a_line_updated_at: out.frozen_before.route_a_line_updated_at,
+      route_b_fingerprint: out.frozen_before.route_b_fingerprint,
+      route_b_updated_at: out.frozen_before.route_b_updated_at,
+      route_b_line_updated_at: out.frozen_before.route_b_line_updated_at,
+      active_ai_headers: out.frozen_before.active_ai_headers,
+      active_ai_lines: out.frozen_before.active_ai_lines,
+      reservation_row_count: out.frozen_before.reservation_row_count
+    });
+
+  // ---- 8. THIS FILE WROTE NOTHING AND CANNOT FLIP THE FLAG. -------------------------------------------------
+  P('writer_not_constructed', false, out.writer_constructed, out.writer_constructed === false);
+  P('db_writes_is_zero', 0, out.db_writes, out.db_writes === 0);
+  P('flag_not_flipped_by_this_file', false, out.flag_flipped_this_round, out.flag_flipped_this_round === false);
+  P('frozen_at_came_from_the_canonical_timestamp_authority', 'procurementTimestamp_',
+    (typeof procurementTimestamp_ === 'function') ? 'procurementTimestamp_' : 'UNAVAILABLE',
+    typeof procurementTimestamp_ === 'function');
+  P('no_generation_called_by_this_file', false, out.generation_called_this_round,
+    out.generation_called_this_round === false);
+
+  out.activation_steps = CENSUS_r6r7ActivationSteps_();
+  out.rollback = CENSUS_r6r7ActivationRollback_();
+  out.browser_audit = CENSUS_r6r7BrowserAudit_();
+
+  if (out.predicates_failed === 0) {
+    out.verdict = 'READY_TO_AUTHORIZE';
+  } else {
+    out.verdict = 'STOP';
+    out.stop_reason = out.predicates_failed + ' condition(s) not met: '
+      + out.predicates.filter(function (p) { return !p.pass; }).map(function (p) { return p.predicate; }).join(', ')
+      + '. Nothing may be authorized while any of these is false.';
+  }
+  return CENSUS_r6r7Finish_(out);
+}
+
+var R6R7_ACTIVATION_BUILD_ = 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R7-R2';
+
+// ================================================================================================================
+// THE BROWSER HALF. Run in the page console; nothing here writes, and nothing here is a substitute for the
+// database readback — the two answer different questions and both are needed.
+//
+// A DELTA, NOT A TOTAL. `timeline()` reports every request the page has made this session. Reading the total
+// after a click counts requests that were already there and reports the wrong number for this test, so the
+// baseline records the highest seq seen BEFORE the click and the delta counts only what came after it.
+// ================================================================================================================
+var R6R7_BROWSER_BASELINE_SNIPPET_ = [
+  '// RUN BEFORE PRESSING GENERATE. Freezes the transport baseline.',
+  'window.__R6R7_BASELINE = (function () {',
+  '  var t = KM.transport.timeline();',
+  '  var maxSeq = t.request_timeline.reduce(function (a, r) { return Math.max(a, r.seq); }, -1);',
+  '  var b = { max_seq: maxSeq,',
+  '    requests: t.requests, mutation_requests: t.mutation_requests,',
+  '    mutation_actions: t.mutations.map(function (m) { return m.action; }) };',
+  '  console.log(JSON.stringify(b));',
+  '  return b;',
+  '})();'
+].join('\n');
+
+var R6R7_BROWSER_DELTA_SNIPPET_ = [
+  '// RUN AFTER EXACTLY ONE CLICK. Reports only what happened after the baseline.',
+  '(function () {',
+  '  var b = window.__R6R7_BASELINE;',
+  '  if (!b) { var nb = { verdict: "STOP", reason: "NO_BASELINE: the baseline snippet was not run before the click, so no delta can be computed. Do not press Generate again; run the database readback." }; console.log(JSON.stringify(nb)); return nb; }',
+  '  var t = KM.transport.timeline();',
+  '  var since = t.request_timeline.filter(function (r) { return r.seq > b.max_seq; });',
+  '  var writes = since.filter(function (r) { return r.kind === "write"; });',
+  '  var gen = writes.filter(function (r) { return r.action === "weeklyAiPlan.generate"; });',
+  '  var out = {',
+  '    baseline_max_seq: b.max_seq,',
+  '    new_requests: since.length,',
+  '    new_mutation_requests: writes.length,',
+  '    generation_requests: gen.length,',
+  '    exactly_one_generation_request: gen.length === 1,',
+  '    unexpected_mutations: writes.filter(function (r) { return r.action !== "weeklyAiPlan.generate"; })',
+  '      .map(function (r) { return r.action; }),',
+  '    route_save_requests: writes.filter(function (r) { return /shippingAllocationDraft|routeSave/i.test(r.action); }).length,',
+  '    submit_requests: writes.filter(function (r) { return /submit/i.test(r.action); }).length,',
+  '    reservation_requests: writes.filter(function (r) { return /reserv/i.test(r.action); }).length,',
+  '    generation: gen.map(function (r) { return {',
+  '      action: r.action, request_id: r.request_id, phase: r.phase, outcome: r.outcome, code: r.code,',
+  '      http_status: r.http_status, attempts: r.attempts, overlapped_with: r.overlapped_with,',
+  '      routes_in_payload: r.routes_in_payload, allocation_draft_id: r.allocation_draft_id,',
+  '      allocation_draft_line_ids: r.allocation_draft_line_ids, intent: r.intent,',
+  '      mints_new_row: r.mints_new_row, marks_source: r.marks_source, elapsed_ms: r.elapsed_ms }; }),',
+  '    scope_reported_by_transport: null,',
+  '    scope_note: "the transport records the action and the rows, not the business scope. Read the scope off the station selector you used and record it by hand; a scope invented here would be a guess."',
+  '  };',
+  '  out.verdict = (out.exactly_one_generation_request && out.new_mutation_requests === 1)',
+  '    ? "ONE_GENERATION_REQUEST" : "STOP";',
+  '  console.log(JSON.stringify(out, null, 2));',
+  '  return out;',
+  '})();'
+].join('\n');
+
+// ================================================================================================================
+// THE TWELVE STEPS, AS DATA. Written down so the person doing them and the person reading the result are
+// following the same list, and so a step that was skipped is a missing line rather than a memory.
+// ================================================================================================================
+function CENSUS_r6r7ActivationSteps_() {
+  return [
+    { n: 1, do: 'Set INVENTORY_AI_PLAN_DB_GENERATION_ENABLED_ to true in 00_config.gs.',
+      note: 'ONE constant. The allowlist is not touched and must not be.' },
+    { n: 2, do: 'Sync ONLY 00_config.gs (and 63_api_v1_system_health.gs if its release id moved).',
+      note: 'No other file changes for an activation. A wider sync is a different deployment.' },
+    { n: 3, do: 'Publish a NEW Web App deployment version.',
+      note: 'Saving the editor does not change what the Web App answers.' },
+    { n: 4, do: 'Hard refresh the page (Ctrl+F5).' },
+    { n: 5, do: 'Verify: system.health reports the deployment contract OK, mixed_deployment false, and the'
+        + ' EFFECTIVE flag true; and the allowlist still holds exactly the one scope.' },
+    { n: 6, do: 'Run RUN_R6R7_CONTROLLED_AI_PLAN_PREFLIGHT() again and read r6r7_proof.',
+      note: 'The flag is now true, so this is a different state from every earlier preflight.' },
+    { n: 7, do: 'Only if it still says READY_NO_ACTION: run the browser BASELINE snippet, then press'
+        + ' Generate AI Plan ONCE through the normal UI.',
+      note: 'The baseline must be taken BEFORE the click, or the delta cannot be computed.' },
+    { n: 8, do: 'Do NOT press it a second time. A replay is verified by READING, never by pressing.' },
+    { n: 9, do: 'Do NOT press Submit Plan.' },
+    { n: 10, do: 'Run the browser DELTA snippet, then RUN_R6R7_CONTROLLED_NO_ACTION_READBACK() immediately.' },
+    { n: 11, do: 'Set the flag back to false, sync 00_config.gs, and publish a deployment version.' },
+    { n: 12, do: 'Verify the EFFECTIVE flag is false again and the deployment contract is still OK.' }
+  ];
+}
+
+// ================================================================================================================
+// A MUTATION REQUEST IS NOT A DATABASE WRITE, and this is the round where those two numbers differ on purpose.
+// ================================================================================================================
+function CENSUS_r6r7BrowserAudit_() {
+  return {
+    why_two_places: 'Apps Script cannot see the browser and the browser cannot see the database. Counting'
+      + ' requests in one and rows in the other is the only way to state both honestly; a readback that'
+      + ' claimed a request count would be inventing it.',
+    expected_shape: {
+      browser_mutation_requests_delta: 1,
+      browser_action: 'weeklyAiPlan.generate',
+      server_db_writes: 0,
+      created_headers: 0, created_lines: 0
+    },
+    the_misreading_to_avoid: 'mutation_requests 1 beside db_writes 0 is the CORRECT shape of a no-action.'
+      + ' The operator asked the server to consider generating and the server answered that nothing needed'
+      + ' writing. Reading the request count as a write count would roll back a correct finish.',
+    baseline_snippet: R6R7_BROWSER_BASELINE_SNIPPET_,
+    delta_snippet: R6R7_BROWSER_DELTA_SNIPPET_,
+    delta_not_total: 'the delta is computed against the baseline seq. A total would count every request the'
+      + ' page had already made this session and report the wrong number for this test.'
+  };
+}
+
+// ================================================================================================================
+// ROLLBACK, IN THE TWO SHAPES IT CAN TAKE.
+// ================================================================================================================
+function CENSUS_r6r7ActivationRollback_() {
+  return {
+    A_no_action_as_expected: {
+      data_rollback_required: false,
+      why: 'nothing was written. There is no row to expire, no version to restore and no total to correct.',
+      still_required: ['set the flag back to false', 'publish a deployment version',
+        're-verify the effective flag is false and the deployment contract is still OK'],
+      manual_routes: 'untouched, which the readback proves field by field and by fingerprint.'
+    },
+    B_any_write_or_unknown_outcome: {
+      first_rule: 'do NOT press Generate again. A retry is a guess about what happened, and a guess that'
+        + ' writes is how one unexplained row becomes two.',
+      order: [
+        'run RUN_R6R7_CONTROLLED_NO_ACTION_READBACK() — the database is the only authority on what happened',
+        'freeze every new or changed allocation_draft_id and allocation_draft_line_id, with their fields',
+        'produce a repair manifest: what moved, what it was, what it should be, and which single write fixes it',
+        'set the flag back to false and publish a deployment version IMMEDIATELY — before any repair',
+        'obtain a separate, explicit authorization before changing any data'
+      ],
+      never: 'never edit the sheet by hand, never delete a row, and never repair from the page. A change with'
+        + ' no recorded reason is indistinguishable from data loss.',
+      ack_unknown: 'a timeout or an unreadable acknowledgement is case B until the readback says otherwise.'
+        + ' A proven zero-write stays retryable; anything else is decided by reading.'
+    }
+  };
+}
+
+// ================================================================================================================
+// R6-R7-R3 — THE READBACK. Zero arguments, read-only, and it refuses to run against a baseline nobody froze.
+// ================================================================================================================
+function RUN_R6R7_CONTROLLED_NO_ACTION_READBACK() {
+  var out = {
+    census: 'RUN_R6R7_CONTROLLED_NO_ACTION_READBACK',
+    build: TEMP_E3_CENSUS_BUILD_,
+    read_only: true, db_writes: 0, writer_constructed: false, writer_calls: 0,
+    submit_calls: 0, route_save_calls: 0, reservation_writes: 0, carrier_master_data_writes: 0,
+    scope: R6R7_SCOPE_,
+    predicates: [], predicates_passed: 0, predicates_failed: 0,
+    baseline_frozen: false, baseline_missing: [],
+    routes_observed: [], changed_fields: [], new_rows: [], counts: null,
+    reservation_authority: null,
+    server_response: null,
+    browser_transport: null,
+    proof_complete: false, proof_missing: ['NOT_EVALUATED'],
+    verdict: 'STOP', stop_reason: ''
+  };
+  function P(name, expected, observed, pass) { return CENSUS_r6r6r3P_(out, name, expected, observed, pass); }
+
+  // ---- THE BASELINE MUST HAVE BEEN FROZEN BY A PERSON. -----------------------------------------------------
+  var missing = R6R7_BEFORE_REQUIRED_.filter(function (k) {
+    var v = R6R7_NO_ACTION_BEFORE_[k];
+    return v === null || v === undefined || v === '';
+  });
+  out.baseline_missing = missing;
+  out.baseline_frozen = missing.length === 0;
+  P('baseline_was_frozen_before_the_click', [], missing, missing.length === 0);
+  if (!out.baseline_frozen) {
+    out.stop_reason = 'BASELINE_NOT_FROZEN: ' + missing.join(', ')
+      + '. Run RUN_R6R7_CONTROLLED_NO_ACTION_ACTIVATION_MANIFEST() and paste its freeze_paste_block into'
+      + ' R6R7_NO_ACTION_BEFORE_ BEFORE pressing Generate. A readback that recomputed its own baseline would'
+      + ' compare the state with itself and report CONFIRMED after a write.';
+    return CENSUS_r6r7Finish_(out);
+  }
+
+  var B = R6R7_NO_ACTION_BEFORE_;
+  var prov = CENSUS_quiet_('RUN_R6R2_ROUTE_PROVENANCE', function () { return RUN_R6R2_ROUTE_PROVENANCE(); });
+  if (prov.error) {
+    P('route_census_readable', 'rows', 'error: ' + CENSUS_str_(prov.error), false);
+    out.stop_reason = 'the route census failed: ' + CENSUS_str_(prov.error);
+    return CENSUS_r6r7Finish_(out);
+  }
+  out.db_writes = CENSUS_num_(prov.db_writes) || 0;
+  out.writer_constructed = prov.writer_constructed === true;
+  var rows = prov.visible_route_rows || [];
+
+  // ---- BYTE-IDENTICAL, BY FINGERPRINT AND THEN FIELD BY FIELD. ---------------------------------------------
+  //
+  // The fingerprint is the whole-row claim; the field comparisons say WHICH column moved when it fails. One
+  // without the other is either an unexplained mismatch or a list that can miss a column nobody listed.
+  [['A', B.route_a, B.route_a_fingerprint, B.route_a_updated_at, B.route_a_line_updated_at],
+   ['B', B.route_b, B.route_b_fingerprint, B.route_b_updated_at, B.route_b_line_updated_at]].forEach(function (c) {
+    var label = c[0], m = c[1], fpWas = c[2], uaWas = c[3], luaWas = c[4];
+    var hits = CENSUS_r6r6r4Find_(rows, m.allocation_draft_id, m.allocation_draft_line_id);
+    var r = hits.length === 1 ? hits[0] : null;
+    var fpNow = CENSUS_r6r7RouteFingerprint_(r);
+    out.routes_observed.push({ label: label, allocation_draft_id: m.allocation_draft_id,
+      fingerprint_was: fpWas, fingerprint_now: fpNow,
+      draft_version: r ? CENSUS_str_(r.draft_version) : null,
+      updated_at: r ? CENSUS_str_(r.updated_at) : null,
+      line_updated_at: r ? CENSUS_str_(r.line_updated_at) : null });
+    P('route_' + label + '_present_exactly_once', 1, hits.length, hits.length === 1);
+    P('route_' + label + '_is_byte_identical', fpWas, fpNow, !!fpNow && fpNow === fpWas);
+    P('route_' + label + '_version_did_not_move', m.draft_version, r ? CENSUS_str_(r.draft_version) : null,
+      !!r && CENSUS_str_(r.draft_version) === m.draft_version);
+    P('route_' + label + '_updated_at_did_not_move', uaWas, r ? CENSUS_str_(r.updated_at) : null,
+      !!r && CENSUS_str_(r.updated_at) === uaWas);
+    P('route_' + label + '_line_updated_at_did_not_move', luaWas, r ? CENSUS_str_(r.line_updated_at) : null,
+      !!r && CENSUS_str_(r.line_updated_at) === luaWas);
+    P('route_' + label + '_was_not_re_owned_by_a_run', 'no generation_run_id, not system_generated',
+      r ? (CENSUS_str_(r.generation_type) + ' / ' + (CENSUS_str_(r.generation_run_id) || '(none)')) : null,
+      !!r && CENSUS_low_(r.generation_type) !== 'system_generated' && CENSUS_str_(r.generation_run_id) === '');
+    if (r && fpNow !== fpWas) {
+      R6R7_FP_FIELDS_.forEach(function (f) {
+        out.changed_fields.push({ route: label, field: f, now: CENSUS_str_(r[f] === undefined ? '' : r[f]) });
+      });
+    }
+  });
+
+  // ---- NOTHING NEW, AND NOTHING MOVED IN THE TOTALS. --------------------------------------------------------
+  var manualIds = [B.route_a.allocation_draft_id, B.route_b.allocation_draft_id];
+  var extra = rows.filter(function (r) { return manualIds.indexOf(CENSUS_str_(r.allocation_draft_id)) === -1; });
+  out.new_rows = extra.map(function (r) {
+    return { allocation_draft_id: r.allocation_draft_id, allocation_draft_line_id: r.allocation_draft_line_id,
+      status: r.status, quantity: r.quantity, generation_type: r.generation_type,
+      generation_run_id: r.generation_run_id, k4_group_key: r.k4_group_key };
+  });
+  P('no_header_or_line_was_created', [], out.new_rows.map(function (r) { return r.allocation_draft_id; }),
+    out.new_rows.length === 0);
+  var total = CENSUS_num_(prov.census_current_plan_total);
+  P('manual_planned_total_did_not_move', B.manual_planned_total, total, total === B.manual_planned_total);
+  var hdrs = (prov.sku_contributing_header_ids || []).slice().sort();
+  var lns = (prov.sku_contributing_line_ids || []).slice().sort();
+  P('the_same_header_ids_contribute', B.manual_header_ids, hdrs,
+    JSON.stringify(hdrs) === JSON.stringify(B.manual_header_ids || []));
+  P('the_same_line_ids_contribute', B.manual_line_ids, lns,
+    JSON.stringify(lns) === JSON.stringify(B.manual_line_ids || []));
+  P('active_ai_rows_did_not_increase', B.active_ai_headers, extra.length,
+    extra.length === CENSUS_num_(B.active_ai_headers));
+  var expired = (prov.excluded_route_ids_with_reason || []).filter(function (x) {
+    return CENSUS_str_(x.reason).indexOf('EXPIRED_BY_THIS_RUN') !== -1; });
+  P('nothing_was_expired_by_a_run', [], expired, expired.length === 0);
+
+  var ssR = null;
+  try { ssR = SpreadsheetApp.openById(prodExpectedDbId_()); } catch (eS) { ssR = null; }
+  var resv = ssR ? CENSUS_r6r7RowCount_(ssR, 'reservations')
+    : { table: 'reservations', row_count: null, reason: 'DB_NOT_OPENED' };
+  // A COUNT WE COULD NOT READ IS NOT A COUNT OF ZERO, so null === null must not carry this claim. It is
+  // allowed to rest on the SERVER's own guarantee instead — 61_'s activation manifest lists `reservations`
+  // among the tables a generation cannot mutate — but only when the count is genuinely unreadable, and the
+  // observed value says which of the two legs answered.
+  var resvComparable = typeof resv.row_count === 'number' && typeof B.reservation_row_count === 'number';
+  var resvDeclaredZero = false;
+  try {
+    var man = (typeof weeklyAiPlanActivationManifest_ === 'function') ? weeklyAiPlanActivationManifest_() : null;
+    resvDeclaredZero = !!man && (man.tables_guaranteed_zero_mutation || []).indexOf('reservations') !== -1;
+  } catch (eM) { resvDeclaredZero = false; }
+  out.reservation_authority = resvComparable ? 'ROW_COUNT'
+    : (resvDeclaredZero ? 'SERVER_MANIFEST_GUARANTEED_ZERO_MUTATION' : 'NONE');
+  P('no_reservation_appeared',
+    resvComparable ? B.reservation_row_count : 'reservations declared zero-mutation by 61_',
+    resvComparable ? resv.row_count : (out.reservation_authority + ': ' + CENSUS_str_(resv.reason)),
+    resvComparable ? (resv.row_count === B.reservation_row_count) : resvDeclaredZero);
+
+  out.counts = {
+    visible_route_rows: rows.length,
+    manual_rows: rows.length - extra.length,
+    new_rows: extra.length,
+    headers: hdrs.length, lines: lns.length,
+    manual_planned_total: total,
+    manual_planned_total_before: B.manual_planned_total,
+    reservation_rows: resv.row_count,
+    reservation_rows_before: B.reservation_row_count
+  };
+
+  // ---- WHAT THE SERVER ANSWERED. Read from the response the operator pastes into the log, or declared
+  //      NOT_SUPPLIED. This census cannot see the browser, and a count it invented would be worse than none.
+  out.server_response = {
+    source: 'the Generate AI Plan response, as shown by the page or by Apps Script > Executions',
+    required_shape: { outcome: 'AI_PLAN_NO_ACTION', code: 'NO_REPLENISHMENT_REQUIRED',
+      recommended_qty: 0, qualifying_planned_qty: R6R7_SET_BEFORE_.current_plan_total, residual_qty: 0,
+      created_headers: 0, created_lines: 0, updated_headers: 0, updated_lines: 0,
+      cancelled_headers: 0, cancelled_lines: 0, db_writes: 0, writer_reached: false,
+      routes: [], groups: [] },
+    note: 'every one of these is asserted against the DATABASE above as well. The response is what the server'
+      + ' says it did; the rows are what it actually did, and they must agree.'
+  };
+  out.browser_transport = {
+    measured_here: false,
+    why: 'Apps Script cannot see the browser transport timeline. The request count is measured in the browser'
+      + ' by the delta snippet and reported separately; fabricating it here would be the one thing this'
+      + ' contract exists to prevent.',
+    required_delta: { mutation_requests: 1, action: 'weeklyAiPlan.generate',
+      route_save_requests: 0, submit_requests: 0, reservation_requests: 0, second_generation_requests: 0 }
+  };
+
+  P('writer_not_constructed', false, out.writer_constructed, out.writer_constructed === false);
+  P('db_writes_is_zero', 0, out.db_writes, out.db_writes === 0);
+
+  if (out.predicates_failed === 0) {
+    out.verdict = 'CONTROLLED_NO_ACTION_CONFIRMED';
+  } else {
+    out.verdict = 'STOP';
+    out.stop_reason = out.predicates_failed + ' predicate(s) failed: '
+      + out.predicates.filter(function (p) { return !p.pass; }).map(function (p) { return p.predicate; }).join(', ')
+      + '. Do NOT press Generate again. Freeze what is there and produce a repair manifest.';
+  }
+  return CENSUS_r6r7Finish_(out);
+}
 
 // ================================================================================================================
 // THE BOUNDED PROOF. Everything an acceptance rests on, in one line small enough to survive.
@@ -6488,6 +7151,140 @@ function CENSUS_r6r7ProofObject_(out) {
   };
 }
 
+/** R6-R7-R3 — the activation manifest's bounded proof. Scalars and two short id lists; no steps, no
+ *  snippets, no rollback prose, no predicate array. All of those are unbounded and all of them are in the
+ *  detailed export, which is where a reader goes for them. */
+function CENSUS_r6r7ActivationProofObject_(out) {
+  var b = out.frozen_before || {};
+  var pp = out.production_path || {};
+  var dep = out.deployment || {};
+  var pa = out.parity || {};
+  return {
+    census: out.census, build: out.build, verdict: out.verdict,
+    predicates_passed: out.predicates_passed, predicates_failed: out.predicates_failed,
+    export_complete: out.export_complete === true, export_missing: out.export_missing || [],
+    proof_complete: out.proof_complete === true, proof_missing: out.proof_missing || [],
+    db_writes: CENSUS_num_(out.db_writes) || 0,
+    writer_calls: CENSUS_num_(out.writer_calls) || 0,
+    writer_constructed: out.writer_constructed === true,
+    submit_calls: CENSUS_num_(out.submit_calls) || 0,
+    route_save_calls: CENSUS_num_(out.route_save_calls) || 0,
+    reservation_writes: CENSUS_num_(out.reservation_writes) || 0,
+    flag_flipped_this_round: out.flag_flipped_this_round === true,
+    generation_called_this_round: out.generation_called_this_round === true,
+    scope: out.scope || null,
+    deployment: { build: dep.deployment_build || null, mixed: dep.mixed_deployment,
+      stale_count: (dep.stale_modules || []).length },
+    flag_now: out.flag ? out.flag.value : null,
+    allowlist_is_exactly_the_frozen_scope: !!out.allowlist && out.allowlist.is_exactly_the_frozen_scope === true,
+    production_path: { outcome: pp.outcome || null, code: pp.code || null, reason: pp.reason || null,
+      would_write: pp.would_write === true, writer_reached: pp.writer_reached === true },
+    parity_agree: pa.agree === undefined ? null : pa.agree,
+    frozen_before: {
+      frozen_at: b.frozen_at || null,
+      calculation_run_id: b.calculation_run_id || null,
+      calculation_date: b.calculation_date || null,
+      calculation_status: b.calculation_status || null,
+      freshness_state: b.freshness_state || null,
+      recommended_qty: b.recommended_qty === undefined ? null : b.recommended_qty,
+      qualifying_active_planned_qty: b.qualifying_active_planned_qty === undefined
+        ? null : b.qualifying_active_planned_qty,
+      residual_qty: b.residual_qty === undefined ? null : b.residual_qty,
+      manual_planned_total: b.manual_planned_total === undefined ? null : b.manual_planned_total,
+      route_a_fingerprint: b.route_a_fingerprint || null,
+      route_b_fingerprint: b.route_b_fingerprint || null,
+      active_ai_headers: b.active_ai_headers === undefined ? null : b.active_ai_headers,
+      reservation_row_count: b.reservation_row_count === undefined ? null : b.reservation_row_count
+    },
+    stop_reason: out.stop_reason || ''
+  };
+}
+
+/** R6-R7-R3 — the readback's bounded proof. The two fingerprints before and after are the whole claim. */
+function CENSUS_r6r7NoActionReadbackProofObject_(out) {
+  var c = out.counts || {};
+  var a = (out.routes_observed || [])[0] || {};
+  var bb = (out.routes_observed || [])[1] || {};
+  return {
+    census: out.census, build: out.build, verdict: out.verdict,
+    predicates_passed: out.predicates_passed, predicates_failed: out.predicates_failed,
+    export_complete: out.export_complete === true, export_missing: out.export_missing || [],
+    proof_complete: out.proof_complete === true, proof_missing: out.proof_missing || [],
+    baseline_frozen: out.baseline_frozen === true, baseline_missing: out.baseline_missing || [],
+    db_writes: CENSUS_num_(out.db_writes) || 0,
+    writer_calls: CENSUS_num_(out.writer_calls) || 0,
+    writer_constructed: out.writer_constructed === true,
+    submit_calls: CENSUS_num_(out.submit_calls) || 0,
+    route_save_calls: CENSUS_num_(out.route_save_calls) || 0,
+    reservation_writes: CENSUS_num_(out.reservation_writes) || 0,
+    scope: out.scope || null,
+    route_a: { id: a.allocation_draft_id || null, fingerprint_was: a.fingerprint_was || null,
+      fingerprint_now: a.fingerprint_now || null, identical: !!a.fingerprint_now && a.fingerprint_now === a.fingerprint_was,
+      draft_version: a.draft_version || null },
+    route_b: { id: bb.allocation_draft_id || null, fingerprint_was: bb.fingerprint_was || null,
+      fingerprint_now: bb.fingerprint_now || null, identical: !!bb.fingerprint_now && bb.fingerprint_now === bb.fingerprint_was,
+      draft_version: bb.draft_version || null },
+    new_rows: (out.new_rows || []).length,
+    new_row_ids: (out.new_rows || []).map(function (r) { return CENSUS_str_(r.allocation_draft_id); }),
+    changed_field_count: (out.changed_fields || []).length,
+    manual_planned_total: c.manual_planned_total === undefined ? null : c.manual_planned_total,
+    manual_planned_total_before: c.manual_planned_total_before === undefined ? null : c.manual_planned_total_before,
+    reservation_rows: c.reservation_rows === undefined ? null : c.reservation_rows,
+    reservation_rows_before: c.reservation_rows_before === undefined ? null : c.reservation_rows_before,
+    browser_transport_measured_here: false,
+    stop_reason: out.stop_reason || ''
+  };
+}
+
+/** R6-R7-R3 — the guards for the two new proofs. Same principle: a proof that cannot show the thing its
+ *  verdict rests on says so, in the line that survives. */
+function CENSUS_r6r7ActivationProofGuard_(out) {
+  var b = out.frozen_before || {};
+  var pp = out.production_path || {};
+  var missing = [];
+  if (!out.frozen_before) missing.push('frozen_before');
+  else {
+    if (!b.route_a_fingerprint || !b.route_b_fingerprint) missing.push('frozen_before.route_fingerprints');
+    if (!b.calculation_run_id) missing.push('frozen_before.calculation_run_id');
+  }
+  if (!out.production_path || !pp.outcome) missing.push('production_path.outcome');
+  if (!out.deployment || out.deployment.available !== true) missing.push('deployment');
+  // A manifest may never say READY while the flag is already on, or while production would write.
+  if (out.verdict === 'READY_TO_AUTHORIZE') {
+    if (out.flag && out.flag.value === true) missing.push('flag_already_true_cannot_be_ready_to_authorize');
+    if (pp.would_write === true) missing.push('would_write_contradicts_READY_TO_AUTHORIZE');
+  }
+  out.proof_complete = missing.length === 0;
+  out.proof_missing = missing;
+  if (!out.proof_complete) {
+    out.verdict = 'STOP';
+    out.stop_reason = (out.stop_reason ? out.stop_reason + ' ' : '')
+      + 'PROOF_INCOMPLETE: ' + missing.join(', ') + '.';
+  }
+  return out.proof_complete;
+}
+
+function CENSUS_r6r7NoActionReadbackProofGuard_(out) {
+  var missing = [];
+  if (out.baseline_frozen !== true) missing.push('baseline_frozen');
+  if (!out.counts) missing.push('counts');
+  if (!out.routes_observed || out.routes_observed.length !== 2) missing.push('routes_observed');
+  if (out.verdict === 'CONTROLLED_NO_ACTION_CONFIRMED') {
+    if ((out.new_rows || []).length !== 0) missing.push('new_rows_contradict_NO_ACTION_CONFIRMED');
+    var bad = (out.routes_observed || []).filter(function (r) {
+      return !r.fingerprint_now || r.fingerprint_now !== r.fingerprint_was; });
+    if (bad.length) missing.push('route_fingerprint_moved_contradicts_NO_ACTION_CONFIRMED');
+  }
+  out.proof_complete = missing.length === 0;
+  out.proof_missing = missing;
+  if (!out.proof_complete) {
+    out.verdict = 'STOP';
+    out.stop_reason = (out.stop_reason ? out.stop_reason + ' ' : '')
+      + 'PROOF_INCOMPLETE: ' + missing.join(', ') + '.';
+  }
+  return out.proof_complete;
+}
+
 /**
  * The proof's own completeness guard. It runs BEFORE the verdict is printed anywhere, because a verdict that
  * has already been announced cannot be withdrawn by a later line — which is the ordering mistake this file
@@ -6543,9 +7340,18 @@ function CENSUS_r6r7Finish_(out) {
       + ' report, and a verdict a reader cannot check is not one.';
     CENSUS_log_('r6r7_export_incomplete', absent.join(', '));
   }
-  // The preflight is the census an acceptance is read from, so it is the one that carries a bounded proof.
-  var wantsProof = out.census === 'RUN_R6R7_CONTROLLED_AI_PLAN_PREFLIGHT';
-  if (wantsProof) CENSUS_r6r7ProofGuard_(out);
+  // Every census an acceptance is read from carries a bounded proof, and each has its own builder and its
+  // own guard: the fields a manifest's verdict rests on are not the fields a readback's rests on, and one
+  // shared shape would carry nulls for most of both.
+  var proofBuilder = null;
+  if (out.census === 'RUN_R6R7_CONTROLLED_AI_PLAN_PREFLIGHT') {
+    CENSUS_r6r7ProofGuard_(out); proofBuilder = CENSUS_r6r7ProofObject_;
+  } else if (out.census === 'RUN_R6R7_CONTROLLED_NO_ACTION_ACTIVATION_MANIFEST') {
+    CENSUS_r6r7ActivationProofGuard_(out); proofBuilder = CENSUS_r6r7ActivationProofObject_;
+  } else if (out.census === 'RUN_R6R7_CONTROLLED_NO_ACTION_READBACK') {
+    CENSUS_r6r7NoActionReadbackProofGuard_(out); proofBuilder = CENSUS_r6r7NoActionReadbackProofObject_;
+  }
+  var wantsProof = proofBuilder !== null;
 
   CENSUS_log_('r6r7', out.census + ' ' + out.verdict + ' — passed ' + out.predicates_passed
     + ' failed ' + out.predicates_failed);
@@ -6554,7 +7360,7 @@ function CENSUS_r6r7Finish_(out) {
   //      survive, so nothing unbounded is allowed above it and nothing at all is allowed between.
   if (wantsProof) {
     var proofLine = null;
-    try { proofLine = JSON.stringify(CENSUS_r6r7ProofObject_(out)); }
+    try { proofLine = JSON.stringify(proofBuilder(out)); }
     catch (eP) { proofLine = null; CENSUS_log_('r6r7_proof_failed', CENSUS_str_(eP && eP.message)); }
     if (proofLine !== null) {
       CENSUS_log_('r6r7_proof', proofLine);

@@ -1053,8 +1053,15 @@ ok(/function TEMP_AI_PLAN_ACTIVATION_CENSUS_FC1B_E3\(args\)/.test(TEMP), 'F1  th
     // and the writer count elsewhere in this project still reads ONE — R6-R6-R3's, unchanged. They sit
     // AFTER the RUN_R6R6_* block: '_' (95) sorts after 'R' (82), so RUN_R6R6R4 precedes RUN_R6R6_MANUAL,
     // and '7' (55) after '6' (54) puts RUN_R6R7 after both.
+    // R6-R7-R3 adds the first controlled NO-ACTION activation pair: the manifest a person authorizes
+    // from, and the readback that proves nothing moved. Both are read-only, take no arguments and
+    // inherit the same hard-coded scope; neither has a write path, and the writer count elsewhere in
+    // this project still reads ONE — R6-R6-R3's, unchanged. Sorted: 'ACTIVATION' < 'AI_PLAN' <
+    // 'NO_ACTION_ACTIVATION' < 'NO_ACTION_READBACK'.
     'RUN_R6R7_CONTROLLED_ACTIVATION_MANIFEST', 'RUN_R6R7_CONTROLLED_AI_PLAN_PREFLIGHT',
-    'RUN_R6R7_CONTROLLED_AI_PLAN_READBACK', 'RUN_R6R7_RECOMMENDATION_AUTHORITY_CENSUS',
+    'RUN_R6R7_CONTROLLED_AI_PLAN_READBACK',
+    'RUN_R6R7_CONTROLLED_NO_ACTION_ACTIVATION_MANIFEST', 'RUN_R6R7_CONTROLLED_NO_ACTION_READBACK',
+    'RUN_R6R7_RECOMMENDATION_AUTHORITY_CENSUS',
     'TEMP_AI_PLAN_ACTIVATION_CENSUS_FC1B_E3'];
   eq(nonHelper.slice().sort(), ALLOWED_ENTRY_POINTS,
     'F1a and those are the ONLY functions not prefixed CENSUS_ — nothing else is invocable from the editor by accident');
