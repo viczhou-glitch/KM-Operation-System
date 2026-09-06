@@ -67,7 +67,7 @@
 // §9 — THE CENSUS WAS REPORTING A BUILD IT NO LONGER WAS. Its behaviour changed in A2-R1-R1 (it learned to
 // read the harvest REFUSAL) and again in A2-R1-R2 (route intent + identity preview) while this literal stayed
 // at A2-R1, so a log could not be matched to the code that produced it. It moves with the file now.
-var TEMP_E3_CENSUS_BUILD_ = 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R6-R4';
+var TEMP_E3_CENSUS_BUILD_ = 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R6-R4-R1';
 
 /** Read-only row reader. The Sheet object stays inside this function — the caller gets values, never a writer. */
 // R6-R3 §2 — the OPTIONAL third argument is a metrics sink. §2 requires the diagnostic to report how many
@@ -4433,11 +4433,17 @@ function CENSUS_r6r6r3FinishBack_(out) {
 //     inventory-replenishment.js), so the page's writes are stamped with the default, and R6-R6-R3's payload
 //     set created_by explicitly. Both values follow from source, and both are FALSIFIABLE: if production
 //     disagrees the readiness STOPs rather than shrugging.
-//   • NOT EVIDENCED — Route B's two post-repair instants. Nobody supplied them and this file will not invent
-//     them. They are named in `snapshot_gaps`, and what replaces the equality gate is stated below.
+//   • R6-R6-R4-R1 — ROUTE B'S TWO POST-REPAIR INSTANTS, WHICH ARE NOW EVIDENCE TOO. R6-R6-R4 could not
+//     freeze them: nobody had reported what the compensation stamped, and a literal would have been a
+//     fabrication wearing the shape of evidence. The live readiness returned SINGLE_ROW_SAVE_READY with
+//     60 of 60 and named them in `snapshot_gaps`; the operator then read them off production. They are
+//     frozen below as EQUALITY gates, `snapshot_gaps` is EMPTY, and no field of either row falls back to
+//     'not checked' — which is the answer that once let an unrelated route move without anyone noticing.
 //
-// HOW ROUTE B IS PROVEN NOT TO HAVE MOVED, WITHOUT ITS TIMESTAMP. Three independent facts, none of which
-// needs a value nobody has:
+// THE THREE DERIVED FACTS ARE KEPT, AS A SECOND CHECK RATHER THAN AS A SUBSTITUTE. They stood in for the
+// equality gate while the value was missing. They are independent of it, each fails on a different kind of
+// drift, and none of them costs a read — so retiring them the moment the literal arrived would trade
+// evidence for tidiness:
 //
 //   1. `draft_version` is still 3. The writer increments it on every UPDATE, so a write that landed on
 //      Route B could not leave it at 3.
@@ -4446,8 +4452,8 @@ function CENSUS_r6r6r3FinishBack_(out) {
 //   3. Route B's `updated_at` is STRICTLY EARLIER than Route A's post-Save `updated_at`. Both stamps come
 //      from the same clock through the same writer; a Save that touched both rows would stamp them together.
 //
-// That is stronger than the equality gate it replaces, because it survives not knowing the absolute value —
-// and it is stated here rather than buried, so nobody reads `snapshot_gaps` as 'unchecked'.
+// An equality gate answers 'is this the row we froze?'. Those three answer 'could anything have written it
+// since?'. They are different questions, and the second one is still worth asking with the first in hand.
 //
 // THE TIMEOUT IS STILL OPEN, AND THIS ROUND DID NOT LOOK AT IT. Recorded here so a round that measured
 // something else cannot be read as having closed it:
@@ -4464,9 +4470,17 @@ function CENSUS_r6r6r3FinishBack_(out) {
 var R6R6R4_A_TARGET_ = { allocation_draft_id: 'SADH-K4-38523A90', allocation_draft_line_id: 'SADL-K2-92B8BAD2' };
 var R6R6R4_B_BYSTANDER_ = { allocation_draft_id: 'SADH-K4-A3872518', allocation_draft_line_id: 'SADL-K2-344FB2B2' };
 
-// The ONE authorized change of stage one, spelled so it cannot be read as a business decision.
-var R6R6R4_AUTHORIZED_ACTION_ = 'Route A last_mile_delivery truck -> parcel, through the ordinary Execution'
-  + ' Plan Save. This is an ISOLATION TEST, not a shipping decision: stage two restores it to truck.';
+// The ONE authorized change of stage one, spelled so it cannot be read as a business decision — and spelled
+// as the page ACTUALLY behaves. R6-R6-R4 said 'through the ordinary Execution Plan Save', and there is no
+// Save button: _scheduleDraftDbPersist debounces for 400 ms and the row's own state cell reports the
+// outcome (IR_ROUTE_SAVE_STATES_ — Saving / Saved / Not saved / Outcome unknown). An operator hunting for
+// a control that does not exist either gives up or clicks something else, and clicking something else is
+// how this incident started.
+var R6R6R4_SAVE_MECHANIC_ = 'change Route A Last Mile ONCE and wait for the debounced auto-save to report'
+  + ' Saved on that row. There is no Save button: the write is scheduled 400 ms after the edit and the row'
+  + ' state cell is the acknowledgement. Do not edit twice, and do not press Submit Plan.';
+var R6R6R4_AUTHORIZED_ACTION_ = 'Route A last_mile_delivery truck -> parcel: ' + R6R6R4_SAVE_MECHANIC_
+  + ' This is an ISOLATION TEST, not a shipping decision: stage two restores it to truck.';
 var R6R6R4_A_AFTER_LAST_MILE_ = 'parcel';
 var R6R6R4_PAGE_ACTOR_ = 'inventory-replenishment';      // 16_ line 499: body.created_by || this
 var R6R6R4_REPAIR_ACTOR_ = 'r6r6r3-compensating-repair'; // what R6-R6-R3 sent as created_by
@@ -4509,10 +4523,12 @@ var R6R6R4_B_BEFORE_ = {
   ownership: 'MANUAL (no generation_run_id — composed by a person)',
   draft_version: '3',
   updated_by: 'r6r6r3-compensating-repair',
-  // NOT FROZEN, and named rather than omitted. See the header comment: the two instants the compensation
-  // stamped were never reported, and a literal here would be a fabrication wearing the shape of evidence.
-  updated_at: null,
-  line_updated_at: null
+  // R6-R6-R4-R1 — READ OFF PRODUCTION, not reconstructed. These are what the compensation stamped, and
+  // they are EQUALITY gates in both directions: the readiness requires them equal because nothing has
+  // happened yet, and the readback requires them equal because Route B is not the row being changed. They
+  // are compared as INSTANTS through CENSUS_r6r6TsKey_, so a zone-name spelling is not a difference.
+  updated_at: 'Sun Sep 06 2026 09:56:04 GMT+0800 (Taiwan Standard Time)',
+  line_updated_at: 'Sun Sep 06 2026 09:56:04 GMT+0800 (Taiwan Standard Time)'
 };
 // The moment the compensation ran must be BEFORE whatever Route B now holds — that is the only thing the
 // missing instants can still be checked against, and it is checkable.
@@ -4567,6 +4583,22 @@ function CENSUS_r6r6r4CmpAll_(out, prefix, frozen, live, fields, gaps) {
   }
 }
 
+// R6-R6-R4-R1 §4 — THE OBSERVED ROW, over exactly the fields the freeze compares. The readiness used to
+// report only a verdict and a predicate list, so reading the two missing instants off production needed a
+// wrapper typed into the Apps Script editor — a function that existed in no commit, that nobody could
+// review, and that the next paste of this file would silently delete. Both states are part of the output
+// now, and pasting this file is the whole of the operation.
+function CENSUS_r6r6r4Observe_(live, fields) {
+  var o = {};
+  for (var i = 0; i < fields.length; i++) o[fields[i]] = live ? CENSUS_str_(live[fields[i]]) : null;
+  return o;
+}
+// The full field list of a frozen record, in freeze order, so `frozen` and `observed` line up column by column.
+function CENSUS_r6r6r4Fields_() {
+  return R6R6R4_IDENTITY_FIELDS_.concat(R6R6R4_BUSINESS_FIELDS_).concat(['last_mile_delivery'])
+    .concat(R6R6R4_AUDIT_FIELDS_);
+}
+
 // ----------------------------------------------------------------------------------------------------------------
 // §3 — READINESS. Read-only. Run it immediately before the one authorized edit.
 // ----------------------------------------------------------------------------------------------------------------
@@ -4578,9 +4610,14 @@ function RUN_R6R6R4_SINGLE_ROW_SAVE_READINESS() {
     submit_calls: 0, reservation_writes: 0, carrier_master_data_writes: 0,
     target: R6R6R4_A_TARGET_, bystander: R6R6R4_B_BYSTANDER_,
     authorized_action: R6R6R4_AUTHORIZED_ACTION_,
+    save_mechanic: R6R6R4_SAVE_MECHANIC_,
     predicates: [], predicates_passed: 0, predicates_failed: 0,
     snapshot_gaps: [],
     derived_gates: [],
+    // §4 — the FROZEN record and the OBSERVED row, side by side, so a gap can be closed from this output
+    //      alone and never again from a wrapper that lives only in the editor.
+    route_a_frozen: R6R6R4_A_BEFORE_, route_a_observed: null,
+    route_b_frozen: R6R6R4_B_BEFORE_, route_b_observed: null,
     already_saved: false,
     stage_two_authorized: false,
     stage_two: 'parcel -> truck, version 3 -> 4, is DESIGNED and NOT AUTHORIZED this round. See'
@@ -4608,6 +4645,7 @@ function RUN_R6R6R4_SINGLE_ROW_SAVE_READINESS() {
 
   // NOT ALREADY DONE. A row that already reads `parcel` at version 3 is not 'not ready' — it is a Save that
   // has already happened, and an operator who cannot tell those apart performs the edit twice.
+  out.route_a_observed = CENSUS_r6r6r4Observe_(a, CENSUS_r6r6r4Fields_());
   out.already_saved = !!a && CENSUS_str_(a.last_mile_delivery).toLowerCase() === R6R6R4_A_AFTER_LAST_MILE_
     && CENSUS_str_(a.draft_version) === '3';
   CENSUS_r6r6r3P_(out, 'route_a_save_has_not_already_happened', 'last mile truck at version 2',
@@ -4618,12 +4656,14 @@ function RUN_R6R6R4_SINGLE_ROW_SAVE_READINESS() {
   var bHits = CENSUS_r6r6r4Find_(rows, R6R6R4_B_BYSTANDER_.allocation_draft_id, R6R6R4_B_BYSTANDER_.allocation_draft_line_id);
   CENSUS_r6r6r3P_(out, 'route_b_present_exactly_once', 1, bHits.length, bHits.length === 1);
   var b = bHits.length === 1 ? bHits[0] : null;
+  out.route_b_observed = CENSUS_r6r6r4Observe_(b, CENSUS_r6r6r4Fields_());
   CENSUS_r6r6r4CmpAll_(out, 'route_b', R6R6R4_B_BEFORE_, b,
     R6R6R4_IDENTITY_FIELDS_.concat(R6R6R4_BUSINESS_FIELDS_).concat(['last_mile_delivery'])
       .concat(R6R6R4_AUDIT_FIELDS_), out.snapshot_gaps);
 
-  // THE TWO GAPS, GATED BY DERIVATION. Later than the compensation, and agreeing with each other because one
-  // transaction stamped both. Named in `derived_gates` so the difference from an equality gate is visible.
+  // Later than the compensation, and agreeing with each other because one transaction stamped both. They
+  // are checked ALONGSIDE the equality gates above rather than instead of them, and they stay named in
+  // `derived_gates` so a reader can tell which claim each predicate is making.
   var floor = CENSUS_r6r6r3TsMs_(R6R6R4_COMPENSATION_FLOOR_);
   ['updated_at', 'line_updated_at'].forEach(function (fld) {
     var now = b ? CENSUS_r6r6r3TsMs_(b[fld]) : null;
@@ -4693,6 +4733,8 @@ function RUN_R6R6R4_SINGLE_ROW_SAVE_READBACK() {
     submit_calls: 0, reservation_writes: 0, carrier_master_data_writes: 0,
     predicates: [], predicates_passed: 0, predicates_failed: 0,
     snapshot_gaps: [], derived_gates: [],
+    route_a_frozen: R6R6R4_A_BEFORE_, route_a_observed: null,
+    route_b_frozen: R6R6R4_B_BEFORE_, route_b_observed: null,
     k4_expected_after: null, k4_actual_after: null,
     stage_two_authorized: false,
     ui_note: 'The Execution Plan may DISPLAY a last mile on either route because a one-profile lane fills the'
@@ -4715,6 +4757,8 @@ function RUN_R6R6R4_SINGLE_ROW_SAVE_READBACK() {
   CENSUS_r6r6r3P_(out, 'route_b_still_present_exactly_once', 1, bHits.length, bHits.length === 1);
   var a = aHits.length === 1 ? aHits[0] : null;
   var b = bHits.length === 1 ? bHits[0] : null;
+  out.route_a_observed = CENSUS_r6r6r4Observe_(a, CENSUS_r6r6r4Fields_());
+  out.route_b_observed = CENSUS_r6r6r4Observe_(b, CENSUS_r6r6r4Fields_());
 
   // ---- ROUTE A: THE INTENDED CHANGE, AND ONLY IT. --------------------------------------------------------------
   CENSUS_r6r6r3P_(out, 'route_a_last_mile_is_parcel', R6R6R4_A_AFTER_LAST_MILE_,
@@ -4807,7 +4851,7 @@ function RUN_R6R6R4_RESTORE_STAGE_TWO_MANIFEST() {
       + ' one to have returned SINGLE_ROW_MUTATION_CONFIRMED and a separate current-turn authorization.',
     precondition: 'RUN_R6R6R4_SINGLE_ROW_SAVE_READBACK returns SINGLE_ROW_MUTATION_CONFIRMED with zero failed'
       + ' predicates. Until then the starting point of stage two is not established.',
-    action: 'Route A last_mile_delivery parcel -> truck, through the ordinary Execution Plan Save.',
+    action: 'Route A last_mile_delivery parcel -> truck: ' + R6R6R4_SAVE_MECHANIC_,
     expected: {
       route_a_last_mile_before: R6R6R4_A_AFTER_LAST_MILE_,
       route_a_last_mile_after: R6R6R4_A_BEFORE_.last_mile_delivery,
@@ -4855,6 +4899,23 @@ function CENSUS_r6r6r4Finish_(out) {
   out.stage_two_authorized = false;
   CENSUS_log_('r6r6r4', out.census + ' ' + out.verdict + ' — passed ' + out.predicates_passed
     + ' failed ' + out.predicates_failed);
+  // §4 — THE COMPLETE EXPORT, IN THE LOG. The editor's Run button shows the execution log and not the
+  //      returned object, which is the only reason an unversioned wrapper was ever needed. One line, so it
+  //      can be copied whole; the predicate list stays out of it because failures are logged individually
+  //      below and a passing run does not need sixty lines to say so.
+  try {
+    CENSUS_log_('r6r6r4_export', JSON.stringify({
+      census: out.census, build: out.build, verdict: out.verdict,
+      predicates_passed: out.predicates_passed, predicates_failed: out.predicates_failed,
+      snapshot_gaps: out.snapshot_gaps, derived_gates: out.derived_gates,
+      db_writes: out.db_writes, writer_calls: out.writer_calls, writer_constructed: out.writer_constructed,
+      submit_calls: out.submit_calls, reservation_writes: out.reservation_writes,
+      route_a_frozen: out.route_a_frozen || null, route_a_observed: out.route_a_observed || null,
+      route_b_frozen: out.route_b_frozen || null, route_b_observed: out.route_b_observed || null,
+      already_saved: out.already_saved, stage_two_authorized: out.stage_two_authorized,
+      stop_reason: out.stop_reason || ''
+    }));
+  } catch (eX) { CENSUS_log_('r6r6r4_export_failed', CENSUS_str_(eX && eX.message)); }
   if (out.snapshot_gaps.length) CENSUS_log_('r6r6r4_snapshot_gaps', out.snapshot_gaps.join(', '));
   out.predicates.forEach(function (p) {
     if (!p.pass) CENSUS_log_('r6r6r4_failed', p.predicate + ': expected ' + JSON.stringify(p.expected)

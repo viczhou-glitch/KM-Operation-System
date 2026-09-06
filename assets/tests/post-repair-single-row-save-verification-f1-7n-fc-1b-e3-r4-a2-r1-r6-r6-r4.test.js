@@ -92,7 +92,15 @@ var B_HEADER = 'SADH-K4-A3872518', B_LINE = 'SADL-K2-344FB2B2';
 // incident; Route B was last written by the compensation, at an instant nobody reported.
 var TS_A = 'Sun Sep 06 2026 08:27:53 GMT+0800 (Taiwan Standard Time)';
 var TS_INCIDENT_B = 'Sun Sep 06 2026 08:28:04 GMT+0800 (Taiwan Standard Time)';
-var TS_COMPENSATED = 'Sun Sep 06 2026 09:15:00 GMT+0800 (Taiwan Standard Time)';
+// R6-R6-R4-R1 — the instant the compensation actually stamped, read off production. R6-R6-R4 used a
+// plausible placeholder here because the real one had not been reported and the freeze carried null; both
+// are the same literal now, which is what turns a derived gate into an equality gate.
+var TS_COMPENSATED = 'Sun Sep 06 2026 09:56:04 GMT+0800 (Taiwan Standard Time)';
+// The SAME INSTANT written three ways. A zone-name spelling is not a difference, and a comparison that
+// thought it was would STOP a correct row over the way a clock printed itself.
+var TS_SAME_OTHER_ZONE_NAME = 'Sun Sep 06 2026 09:56:04 GMT+0800 (CST)';
+var TS_SAME_AS_UTC = '2026-09-06T01:56:04.000Z';
+var TS_ONE_SECOND_LATER = 'Sun Sep 06 2026 09:56:05 GMT+0800 (Taiwan Standard Time)';
 var TS_SAVE = 'Sun Sep 06 2026 14:30:00 GMT+0800 (Taiwan Standard Time)';
 var PAGE_ACTOR = 'inventory-replenishment';
 var REPAIR_ACTOR = 'r6r6r3-compensating-repair';
@@ -359,12 +367,25 @@ eq(Object.keys(RD.predicates[0]), ['predicate', 'expected', 'observed', 'pass'],
   'R2  every predicate row is { predicate, expected, observed, pass } and nothing else');
 ok(RD.predicates.every(function (p) { return typeof p.predicate === 'string' && typeof p.pass === 'boolean'; }),
   'R2a on every row');
-// THE GAPS ARE NAMED. Exactly the two instants nobody supplied, and nothing else falls back to 'not checked'.
-eq(RD.snapshot_gaps, ['route_b.updated_at', 'route_b.line_updated_at'],
-  'R3  snapshot_gaps names EXACTLY the two Route B instants that were never reported');
-ok(RD.derived_gates.length === 3, 'R3a and three derived gates stand in for them');
+// R6-R6-R4-R1 — THE GAP IS CLOSED. Production reported the two instants, they are frozen, and NOTHING
+// falls back to 'not checked' — which is the answer that once let an unrelated route move unnoticed.
+eq(RD.snapshot_gaps, [], 'R3  snapshot_gaps is EMPTY: every frozen field of both rows is compared');
+ok(RD.predicates.some(function (p) { return p.predicate === 'route_b_updated_at_unchanged' && p.pass
+  && p.expected === TS_COMPENSATED; }),
+  'R3a route_b.updated_at is an EQUALITY gate against the production literal');
+ok(RD.predicates.some(function (p) { return p.predicate === 'route_b_line_updated_at_unchanged' && p.pass
+  && p.expected === TS_COMPENSATED; }),
+  'R3b and so is route_b.line_updated_at');
+// The three derived facts are KEPT. They answer a different question — 'could anything have written this
+// since?' rather than 'is this the row we froze?' — and they cost no read, so they are not retired.
+eq(RD.derived_gates, ['route_b_updated_at_is_after_the_compensation_write',
+  'route_b_line_updated_at_is_after_the_compensation_write', 'route_b_header_and_line_instants_agree'],
+  'R3c the three derived gates still run, ALONGSIDE the equality gates rather than instead of them');
+RD.derived_gates.forEach(function (n) {
+  ok(RD.predicates.some(function (p) { return p.predicate === n && p.pass; }), 'R3c-' + n);
+});
 ok(RD.frozen_snapshot_source.indexOf(TS_COMPENSATED) !== -1,
-  'R3b with a paste-ready literal offered, so the gap can be closed in one read-only round trip');
+  'R3d and the paste-ready literal agrees with what is frozen');
 // The three self-checks are predicates, not prose.
 ['writer_not_constructed', 'db_writes_is_zero', 'writer_calls_is_zero'].forEach(function (n, i) {
   ok(RD.predicates.some(function (p) { return p.predicate === n && p.pass; }), 'R4' + '.abc'[i] + ' ' + n);
@@ -378,6 +399,91 @@ eq(RD.stage_two_authorized, false, 'R5a stage two is not authorized by a readine
  'route_b_save_target_would_not_be_minted'].forEach(function (n, i) {
   ok(RD.predicates.some(function (p) { return p.predicate === n && p.pass; }), 'R6' + '.abcdefg'[i] + ' ' + n);
 });
+
+// ================================================================================================================
+section('§2/§5 — THE TWO FROZEN INSTANTS, AS EQUALITY GATES');
+// ================================================================================================================
+// ONE SECOND IS A DIFFERENCE. Each field on its own, because a gate that only fires when both move is not
+// two gates.
+[['bHeader', 'updated_at', 'route_b_updated_at_unchanged'],
+ ['bLine', 'updated_at', 'route_b_line_updated_at_unchanged']].forEach(function (c, i) {
+  var over = {}; over[c[0]] = {}; over[c[0]][c[1]] = TS_ONE_SECOND_LATER;
+  var w = new World(over);
+  var r = w.run('RUN_R6R6R4_SINGLE_ROW_SAVE_READINESS').res;
+  eq([r.verdict, has(r, c[2]), w.dbWrites()], ['STOP', true, 0],
+    'G' + (i + 1) + '  one second on ' + c[2] + ' STOPs the readiness, and writes nothing');
+});
+// AND ONE SECOND EARLIER, which the derived floor alone would also have caught — but only on this side of
+// the compensation. The equality gate catches it on both.
+var wEarly = new World({ bHeader: { updated_at: 'Sun Sep 06 2026 09:56:03 GMT+0800 (Taiwan Standard Time)' } });
+var rEarly = wEarly.run('RUN_R6R6R4_SINGLE_ROW_SAVE_READINESS').res;
+eq([rEarly.verdict, has(rEarly, 'route_b_updated_at_unchanged'),
+    has(rEarly, 'route_b_updated_at_is_after_the_compensation_write')], ['STOP', true, false],
+  'G3  one second EARLIER STOPs on the equality gate while the derived floor still passes');
+// THE SAME INSTANT, SPELLED DIFFERENTLY, IS THE SAME INSTANT.
+var wZone = new World({ bHeader: { updated_at: TS_SAME_OTHER_ZONE_NAME },
+  bLine: { updated_at: TS_SAME_OTHER_ZONE_NAME } });
+var rZone = wZone.run('RUN_R6R6R4_SINGLE_ROW_SAVE_READINESS').res;
+eq([rZone.verdict, rZone.predicates_failed], ['SINGLE_ROW_SAVE_READY', 0],
+  'G4  a different ZONE NAME for the same moment is not a difference');
+var wUtc = new World({ bHeader: { updated_at: TS_SAME_AS_UTC }, bLine: { updated_at: TS_SAME_AS_UTC } });
+var rUtc = wUtc.run('RUN_R6R6R4_SINGLE_ROW_SAVE_READINESS').res;
+eq([rUtc.verdict, rUtc.predicates_failed], ['SINGLE_ROW_SAVE_READY', 0],
+  'G4a and neither is the same moment expressed as UTC — instants are compared, never display text');
+// The normalisation is the family's own, not a second copy written for this round.
+eq(vm.runInContext('CENSUS_r6r6TsKey_(' + JSON.stringify(TS_COMPENSATED) + ')', w0.ctx),
+  vm.runInContext('CENSUS_r6r6TsKey_(' + JSON.stringify(TS_SAME_AS_UTC) + ')', w0.ctx),
+  'G4b through CENSUS_r6r6TsKey_, the one instant normaliser the whole R6-R6 family shares');
+
+// ================================================================================================================
+section('§4 — THE COMPLETE EXPORT, SO NO UNVERSIONED WRAPPER IS EVER NEEDED AGAIN');
+// ================================================================================================================
+var FIELDS = vm.runInContext('CENSUS_r6r6r4Fields_()', w0.ctx);
+eq(Object.keys(RD.route_b_observed), FIELDS,
+  'F1  the readiness reports the OBSERVED Route B row over every frozen field');
+eq(Object.keys(RD.route_a_observed), FIELDS, 'F1a and the observed Route A row over the same list');
+eq(RD.route_b_frozen.updated_at, TS_COMPENSATED, 'F1b beside the FROZEN record it was compared against');
+eq(RD.route_b_observed.updated_at, TS_COMPENSATED, 'F1c so a future gap can be closed from this output alone');
+eq(RD.route_a_frozen.draft_version, '2', 'F1d Route A frozen at the version the Save will guard against');
+['verdict', 'predicates_passed', 'predicates_failed', 'snapshot_gaps', 'db_writes', 'writer_calls',
+ 'route_a_frozen', 'route_a_observed', 'route_b_frozen', 'route_b_observed'].forEach(function (k) {
+  ok(Object.prototype.hasOwnProperty.call(RD, k), 'F2-' + k + ' is in the readiness output');
+});
+// THE EDITOR SHOWS THE LOG, NOT THE RETURN VALUE. That is the only reason a wrapper was ever typed in by
+// hand, so the export is a log line as well as a returned field.
+var expLine = w0.log.filter(function (m) { return m.indexOf('r6r6r4_export') !== -1; });
+eq(expLine.length, 1, 'F3  the readiness logs exactly ONE complete export line');
+var exp = JSON.parse(expLine[0].slice(expLine[0].indexOf('{')));
+eq([exp.verdict, exp.predicates_failed, exp.snapshot_gaps, exp.db_writes, exp.writer_calls],
+  ['SINGLE_ROW_SAVE_READY', 0, [], 0, 0], 'F3a carrying the verdict, the counts, the gaps and the zeroes');
+eq(exp.route_b_observed.updated_at, TS_COMPENSATED, 'F3b and both rows, field by field');
+eq(exp.route_a_observed.last_mile_delivery, 'truck', 'F3c including Route A');
+ok(exp.predicates === undefined, 'F3d and NOT the sixty predicate rows — failures are logged one by one');
+// The wrapper this replaces took no arguments and read nothing a console could aim; neither does this.
+ok(!/RUN_R6R6R4_READINESS_FULL_EXPORT/.test(CENSUS),
+  'F4  and there is no separate FULL_EXPORT entry point to drift out of version control');
+
+// ================================================================================================================
+section('§3 — THE OPERATION, SPELLED AS THE PAGE ACTUALLY BEHAVES');
+// ================================================================================================================
+// THERE IS NO SAVE BUTTON. _scheduleDraftDbPersist debounces for 400 ms and the row's own state cell is the
+// acknowledgement; an operator hunting for a control that does not exist clicks something else, and
+// clicking something else is how this incident started.
+ok(/_draftDbTimers\[sku\] = setTimeout\(function \(\) \{ _draftDbTimers\[sku\] = null; _flushDraftDbPersist\(sku\); \}, 400\);/.test(PAGE),
+  'W1  the page schedules the write on a 400 ms debounce, with no explicit Save control');
+ok(/SAVED: 'Saved'/.test(PAGE), 'W1a and the row state cell reports Saved, which is the acknowledgement');
+// Counted in the CODE, not the commentary: the one surviving mention is the sentence explaining why the
+// wording changed, and deleting the record of a correction is not the same as making it.
+var _opText = CENSUS.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/[^\n]*/g, '$1 ');
+eq((_opText.match(/ordinary Execution Plan Save/g) || []).length, 0,
+  'W2  no operator-facing string tells anyone to press a Save button that does not exist');
+ok(/R6-R6-R4 said 'through the ordinary Execution Plan Save', and there is no/.test(CENSUS),
+  'W2a while the comment recording WHY it changed is kept');
+ok(/debounced auto-save/.test(RD.save_mechanic) && /Saved/.test(RD.save_mechanic),
+  'W3  the readiness states the real mechanic: edit once, wait for the debounced auto-save to report Saved');
+ok(/no Save button/i.test(RD.save_mechanic), 'W3a in so many words');
+ok(/ONCE/.test(RD.save_mechanic) && /Submit Plan/.test(RD.save_mechanic),
+  'W3b once, and not Submit Plan');
 
 // ================================================================================================================
 section('§8a — THE OLD BASELINES ARE REFUSED');
@@ -566,6 +672,28 @@ var wActor = new World({ aHeader: { recommended_last_mile_delivery: 'parcel', dr
 var rActor = wActor.run('RUN_R6R6R4_SINGLE_ROW_SAVE_READBACK').res;
 eq([rActor.verdict, has(rActor, 'route_a_updated_by_is_the_page')], ['STOP', true],
   'E5  and a write recorded against a DIFFERENT actor STOPs — the Save was not what moved it');
+// R6-R6-R4-R1 — ROUTE B'S INSTANTS ARE NOW A READBACK GATE TOO. A bystander whose stamp moved at all is a
+// bystander something wrote, whatever else still looks right. Each field on its own.
+[['bHeader', 'updated_at', 'route_b_updated_at_unchanged'],
+ ['bLine', 'updated_at', 'route_b_line_updated_at_unchanged']].forEach(function (c, i) {
+  var over = { aHeader: { recommended_last_mile_delivery: 'parcel', draft_version: '3', updated_at: TS_SAVE },
+    aLine: { updated_at: TS_SAVE } };
+  over[c[0]] = over[c[0]] || {}; over[c[0]][c[1]] = TS_ONE_SECOND_LATER;
+  var w2 = new World(over);
+  var r2 = w2.run('RUN_R6R6R4_SINGLE_ROW_SAVE_READBACK').res;
+  eq([r2.verdict, has(r2, c[2]), w2.dbWrites()], ['STOP', true, 0],
+    'E6' + '.ab'[i + 1] + ' the bystander ' + c[1] + ' moving by ONE SECOND after the Save STOPs the readback');
+});
+// And a clean Save leaves them exactly where they were, so the gate discriminates rather than always firing.
+eq([w.header(B_HEADER).updated_at, w.line(B_LINE).updated_at], [TS_COMPENSATED, TS_COMPENSATED],
+  'E6c after the authorized Save, Route B still holds the two instants that were frozen');
+ok(!has(RB, 'route_b_updated_at_unchanged') && !has(RB, 'route_b_line_updated_at_unchanged'),
+  'E6d and the readback agrees — both equality gates pass on the clean single-row Save');
+// ROUTE A's are ALLOWED to advance, and did. The asymmetry is the whole point: one row is being changed.
+ok(!has(RB, 'route_a_updated_at_advanced') && !has(RB, 'route_a_line_updated_at_advanced'),
+  'E7  the two Route A stamps ADVANCED, and that is what a landed write looks like');
+ok(String(w.header(A_HEADER).updated_at) !== TS_A && String(w.line(A_LINE).updated_at) !== TS_A,
+  'E7a measured on the rows, not inferred from the verdict');
 
 // ================================================================================================================
 section('§5/§8 — A PAYLOAD THAT MIXES IN ROUTE B, AND A FALLBACK THAT EXPANDS TO EVERY ROW');
@@ -721,10 +849,18 @@ eq((CENSUS.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/[^\n]*/g, '$1 
 // ================================================================================================================
 section('§9 — RELEASE');
 // ================================================================================================================
+// R6-R6-R4-R1 — DERIVED, not pinned. R6-R6-R4 wrote this as an equality with now after removing three of
+// them from neighbouring suites, and the very next round broke it. The claim is that the diagnostic
+// changed in R6-R6-R4 OR LATER.
 var declared = (CENSUS.match(/var TEMP_E3_CENSUS_BUILD_ = '([^']+)'/) || [])[1];
-eq(declared, 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R6-R4', 'Y1  the diagnostic declares this round');
-ok(RO.OWNER_STAMPS.indexOf(declared) !== -1, 'Y1a and the ledger records it');
-ok(RO.BUILD_STAMP_RE.test(declared), 'Y1b as a well-formed stamp');
+ok(RO.OWNER_STAMPS.indexOf(declared) >= RO.OWNER_STAMPS.indexOf('F1-7N-FC-1B-E3-R4-A2-R1-R6-R6-R4'),
+  'Y1  the diagnostic declares R6-R6-R4 or a later round (' + declared + ')');
+ok(RO.OWNER_STAMPS.indexOf('F1-7N-FC-1B-E3-R4-A2-R1-R6-R6-R4') !== -1,
+  'Y1a and the ledger still records the round this suite belongs to');
+ok(RO.BUILD_STAMP_RE.test(declared), 'Y1b and whatever it declares is a well-formed stamp');
+// AND THIS ROUND MOVED NO FRONTEND FILE, so it introduced no token of its own.
+eq(RO.ROUND_TOKENS.filter(function (t) { return /r6r6r4r1/i.test(t); }), [],
+  'Y1c R6-R6-R4-R1 introduced NO cache token — it changed the diagnostic and its tests, nothing else');
 // A FRONTEND FILE CHANGED, so the shared token MUST have moved — the opposite of R6-R6-R3's claim.
 eq(RO.currentAppToken(), 'fc1be3r4a2r1r6r6r4-mutationaudit-20260906',
   'Y2  the cache token MOVED, because two co-deployed frontend files changed');
@@ -767,19 +903,41 @@ mut('N1  the readiness reusing R6-R6-R3\'s pre-repair Route B baseline', functio
   var r = withCensus(m).run('RUN_R6R6R4_SINGLE_ROW_SAVE_READINESS').res;
   return r.verdict === 'STOP' && RD.verdict === 'SINGLE_ROW_SAVE_READY';
 });
-mut('N2  the missing Route B instants reported as an empty gap list', function () {
-  var m = swap(CENSUS, "      if (gaps.indexOf(prefix + '.' + k) === -1) gaps.push(prefix + '.' + k);",
-                       "      if (false) gaps.push(prefix + '.' + k);");
+mut('N2  the freeze put back to null, reopening the gap this round closed', function () {
+  // The gap machinery is not exercised by the happy path any more, so it is exercised HERE: unfreeze the
+  // two instants and the readiness must name them again rather than quietly stop comparing them.
+  var m = swap(CENSUS, cr("  updated_at: '" + TS_COMPENSATED + "',",
+    "  line_updated_at: '" + TS_COMPENSATED + "'"),
+    cr("  updated_at: null,", "  line_updated_at: null"));
   var r = withCensus(m).run('RUN_R6R6R4_SINGLE_ROW_SAVE_READINESS').res;
-  return JSON.stringify(r.snapshot_gaps) === '[]' && RD.snapshot_gaps.length === 2;
+  return JSON.stringify(r.snapshot_gaps) === JSON.stringify(['route_b.updated_at', 'route_b.line_updated_at'])
+    && JSON.stringify(RD.snapshot_gaps) === '[]';
 });
-mut('N3  a frozen null compared as though it were a value', function () {
-  var m = swap(CENSUS, cr("    if (frozen[k] === null || frozen[k] === undefined) {",
+mut('N3  a frozen null silently COMPARED instead of reported as a gap', function () {
+  // Both mutations at once: unfreeze the instants AND remove the null guard. A null that reaches the
+  // comparator stringifies to '' and fails against a real timestamp, so the row would be refused for a
+  // reason nobody could act on — which is worse than the gap, not better.
+  var m = swap(CENSUS, cr("  updated_at: '" + TS_COMPENSATED + "',",
+    "  line_updated_at: '" + TS_COMPENSATED + "'"),
+    cr("  updated_at: null,", "  line_updated_at: null"));
+  m = swap(m, cr("    if (frozen[k] === null || frozen[k] === undefined) {",
     "      if (gaps.indexOf(prefix + '.' + k) === -1) gaps.push(prefix + '.' + k);"),
     cr("    if (false) {",
     "      if (gaps.indexOf(prefix + '.' + k) === -1) gaps.push(prefix + '.' + k);"));
   var r = withCensus(m).run('RUN_R6R6R4_SINGLE_ROW_SAVE_READINESS').res;
-  return r.verdict === 'STOP' && RD.verdict === 'SINGLE_ROW_SAVE_READY';
+  return r.verdict === 'STOP' && JSON.stringify(r.snapshot_gaps) === '[]'
+    && has(r, 'route_b_updated_at_unchanged') && RD.verdict === 'SINGLE_ROW_SAVE_READY';
+});
+mut('N13 the two instants left to the DERIVED gates alone, with no equality gate', function () {
+  // The derived floor accepts anything after the compensation, so a bystander stamped one second later
+  // would pass. That is exactly the drift the equality gate exists to catch.
+  var m = swap(CENSUS, cr("  updated_at: '" + TS_COMPENSATED + "',",
+    "  line_updated_at: '" + TS_COMPENSATED + "'"),
+    cr("  updated_at: null,", "  line_updated_at: null"));
+  var over = { bHeader: { updated_at: TS_ONE_SECOND_LATER }, bLine: { updated_at: TS_ONE_SECOND_LATER } };
+  var r = withCensus(m, over).run('RUN_R6R6R4_SINGLE_ROW_SAVE_READINESS').res;
+  var real = new World(over).run('RUN_R6R6R4_SINGLE_ROW_SAVE_READINESS').res;
+  return r.verdict === 'SINGLE_ROW_SAVE_READY' && real.verdict === 'STOP';
 });
 mut('N4  the K4 expectation derived from the row being checked instead of from the frozen key', function () {
   var m = swap(CENSUS,
