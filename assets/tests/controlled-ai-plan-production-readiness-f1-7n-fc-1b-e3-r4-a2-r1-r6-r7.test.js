@@ -89,7 +89,7 @@ var KMREC = read('assets/js/core/supply-recommendation.js');
 var E3SUITE = read('assets/tests/ai-plan-activation-and-execution-row-layout-f1-7n-fc-1b-e3.test.js');
 var RO = require('./_release-order.js');
 
-var STAMP = 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R7-R1';
+var STAMP = 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R7-R2';
 var SKU = 'CO1100-R';
 var A_HEADER = 'SADH-K4-38523A90', A_LINE = 'SADL-K2-92B8BAD2';
 var B_HEADER = 'SADH-K4-A3872518', B_LINE = 'SADL-K2-344FB2B2';
@@ -315,6 +315,13 @@ function World(over, censusSrc, g61Src) {
     extractFn(G61, 'weeklyAiPlanNetSitesByResidual_'),
     extractFn(G61, 'weeklyAiPlanNoActionDecision_'),
     extractFn(G61, 'weeklyAiPlanNoActionResponse_'),
+    // R6-R7-R2 — the shared decision builder the handler returns its envelope from, and the ONE thing the
+    // census is now allowed to ask. Without it in this world the preflight reports UNAVAILABLE, which is
+    // the correct answer to 'we could not ask' and the wrong world to test parity in.
+    extractFn(G61, 'weeklyAiPlanScopeEmptyRefusal_'),
+    extractVar(G61, 'WAP_CONTROLLED_GATE_ORDER_'),
+    extractFn(G61, 'weeklyAiPlanControlledDecisionFromParts_'),
+    extractFn(G61, 'weeklyAiPlanControlledDecision_'),
     extractVar(G16, 'SAD_TERMINAL_STATUSES_'),
     extractVar(G16, 'SAD_TERMINAL_LINE_STATUSES_'),
     'function inventoryAiPlanActivationAllowlist_() { return INVENTORY_AI_PLAN_ACTIVATION_ALLOWLIST_; }',

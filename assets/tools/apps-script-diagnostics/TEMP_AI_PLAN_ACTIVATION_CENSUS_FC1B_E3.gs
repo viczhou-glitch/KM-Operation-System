@@ -67,7 +67,7 @@
 // §9 — THE CENSUS WAS REPORTING A BUILD IT NO LONGER WAS. Its behaviour changed in A2-R1-R1 (it learned to
 // read the harvest REFUSAL) and again in A2-R1-R2 (route intent + identity preview) while this literal stayed
 // at A2-R1, so a log could not be matched to the code that produced it. It moves with the file now.
-var TEMP_E3_CENSUS_BUILD_ = 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R7-R1';
+var TEMP_E3_CENSUS_BUILD_ = 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R7-R2';
 
 /** Read-only row reader. The Sheet object stays inside this function — the caller gets values, never a writer. */
 // R6-R3 §2 — the OPTIONAL third argument is a metrics sink. §2 requires the diagnostic to report how many
@@ -269,6 +269,29 @@ function TEMP_AI_PLAN_ACTIVATION_CENSUS_FC1B_E3(args) {
     read_only: true, db_writes: 0, drive_writes: 0, status_transitions: 0, emails: 0,
     // the writer is not merely unused, it is never constructed — see the header note
     writer_constructed: false,
+    // ==========================================================================================================
+    // R6-R7-R2 — WHAT THIS CENSUS IS, STATED BEFORE ANY OF ITS FINDINGS.
+    //
+    // It is the ALLOCATOR PROJECTION: harvest -> KMWRB source lines -> the K2 allocator, which is what PASS 1
+    // of a generation computes. It is NOT the public generation handler, and since R6-R7-R1 it no longer
+    // predicts that handler's outcome: the handler asks the canonical no-action question BEFORE the
+    // empty-scope refusal, so a projection that allocates nothing tells you the allocator found nothing to
+    // ship — never that the generation refuses.
+    //
+    // Its verdict is scoped to itself for that reason. The production answer has exactly one source,
+    // weeklyAiPlanControlledDecision_ in 61_, reported as `production_path` by
+    // RUN_R6R7_CONTROLLED_AI_PLAN_PREFLIGHT.
+    // ==========================================================================================================
+    projection_class: 'LEGACY_ALLOCATOR_PROJECTION',
+    verdict_scope: 'THIS_PROJECTION_ONLY',
+    is_production_generation_authority: false,
+    production_authority: 'RUN_R6R7_CONTROLLED_AI_PLAN_PREFLIGHT().production_path (weeklyAiPlanControlledDecision_, 61_)',
+    // Declared here, never left undefined. Every early return goes through CENSUS_logAll_, which stamps the
+    // stage it was unassembled at — because the live log printed `production_parity undefined` beside a
+    // STOP and a reader had nothing to distinguish 'no parity' from 'never got that far'.
+    production_parity: { assembled: false,
+      reason: 'NOT_ASSEMBLED: this census returned before the parity block was reached',
+      unassembled_at_stage: null, blockers: null },
     ok: false, verdict: 'STOP', blockers: []
   };
   args = args || {};
@@ -503,8 +526,16 @@ function TEMP_AI_PLAN_ACTIVATION_CENSUS_FC1B_E3(args) {
       mine = allocated.filter(function (a) { return CENSUS_str_(a.marketplace) === marketplace; });
       out.allocated_lines = { scope_total: allocated.length, this_marketplace: mine.length };
       if (!mine.length) {
-        out.blockers.push('REQUESTED_SCOPE_EMPTY: the marketplace produced no allocated lines (the generation ' +
-          'fails closed with the same code — it never fans out to other marketplaces)');
+        // R6-R7-R2 — THIS SENTENCE USED TO END '(the generation fails closed with the same code)'. It no
+        // longer does, because since R6-R7-R1 it is false: the public handler asks the canonical row first,
+        // and a READY row holding a finite 0 in every window returns AI_PLAN_NO_ACTION with zero writes
+        // BEFORE this refusal is reachable. A projection that allocates nothing is evidence about the
+        // allocator and about nothing else.
+        out.blockers.push('PROJECTION_ALLOCATED_NOTHING_FOR_THE_REQUESTED_MARKETPLACE: the K2 allocator '
+          + 'produced no line for ' + marketplace + '. This is a LEGACY_ALLOCATOR_PROJECTION finding, NOT '
+          + 'the generation\'s outcome: the public handler resolves the canonical no-action decision before '
+          + 'any empty-scope refusal, so read production_path in RUN_R6R7_CONTROLLED_AI_PLAN_PREFLIGHT for '
+          + 'what a Generate would actually answer.');
         out.next_blocked_stage = out.next_blocked_stage || 'REQUESTED_SCOPE';
       }
     }
@@ -554,7 +585,11 @@ function TEMP_AI_PLAN_ACTIVATION_CENSUS_FC1B_E3(args) {
     })
   };
   if (sku && !skuLines.length) {
-    out.blockers.push('SKU_NOT_IN_SCOPE: the named SKU produced no allocated line for this marketplace');
+    // Same correction: an allocator that ships nothing for a SKU that needs nothing is the allocator being
+    // right, and this line is not a statement about what a generation would return.
+    out.blockers.push('PROJECTION_NO_ALLOCATED_LINE_FOR_SKU: ' + sku + ' produced no allocated line for this '
+      + 'marketplace in the LEGACY_ALLOCATOR_PROJECTION. A SKU with a canonical valid-zero recommendation '
+      + 'produces no line here and is a correct finish in production — see production_path.');
   }
 
   // ==============================================================================================================
@@ -945,6 +980,9 @@ function TEMP_AI_PLAN_ACTIVATION_CENSUS_FC1B_E3(args) {
   // — would put a live write one typo from a diagnostic, and a standing mutation test fails if this file ever
   // reaches for handleUpsertShippingAllocationDraftAtomic_.
   out.production_parity = {
+    assembled: true,
+    reason: null,
+    unassembled_at_stage: null,
     contract: 'the fields a production generation decides; compared against the real core in the R3 suite',
     writer_constructed: false,
     target_sku_set: (function () { var o = {}, l = []; (mine || []).forEach(function (a) { var k = CENSUS_str_(a.sku); if (k && !o[k]) { o[k] = 1; l.push(k); } }); return l.sort(); })(),
@@ -1524,6 +1562,15 @@ function CENSUS_schemaParity_() {
 }
 
 function CENSUS_logAll_(out) {
+  // R6-R7-R2 — a parity block that was never reached says so, with the stage it stopped at and the
+  // blockers known at that moment. `undefined` in a log is a reader's problem, not a finding.
+  if (out && out.production_parity && out.production_parity.assembled !== true) {
+    out.production_parity.unassembled_at_stage = out.next_blocked_stage || 'BEFORE_ALLOCATOR';
+    out.production_parity.blockers = (out.blockers || []).slice();
+  }
+  CENSUS_log_('projection_class', out ? (out.projection_class || null) : null);
+  CENSUS_log_('is_production_generation_authority',
+    out ? (out.is_production_generation_authority === true) : null);
   CENSUS_log_('verdict', out.verdict);
   CENSUS_log_('scope', out.scope);
   CENSUS_log_('planning_cycle', out.planning_cycle);
@@ -5500,6 +5547,9 @@ function RUN_R6R7_CONTROLLED_AI_PLAN_PREFLIGHT() {
     // possible failure mode for a preflight: it certified a run that could not happen.
     production_path: null,
     parity: null,
+    // R6-R7-R2 — the allocator projection appears in the same execution log, and a reader needs to know
+    // which of the two answers is about production BEFORE reading either.
+    legacy_projection: null,
     verdict: 'STOP', stop_reason: ''
   };
   function P(name, expected, observed, pass) { return CENSUS_r6r6r3P_(out, name, expected, observed, pass); }
@@ -5668,6 +5718,35 @@ function RUN_R6R7_CONTROLLED_AI_PLAN_PREFLIGHT() {
   // ---- WHAT A GENERATION WOULD PROPOSE, from the pure plan builder the real run uses. -----------------------
   var e3 = null;
   try { e3 = RUN_E3_CENSUS_RESUS_US_AMAZON_CO1100R(); } catch (eE) { e3 = null; }
+  // ============================================================================================================
+  // R6-R7-R2 — WHY THE LOG CARRIES A STOP AND A READY AT THE SAME TIME, SAID HERE RATHER THAN LEFT TO THE
+  // READER. This call is how the preflight learns which ROUTES a generation would propose, and it prints its
+  // own verdict on the way through. That verdict is the allocator projection's, scoped to itself: an
+  // allocator that ships nothing for a scope that needs nothing is the allocator being right.
+  //
+  // It is recorded, subordinated and labelled. The production answer is `production_path`, and nothing else
+  // in this file is allowed to stand in for it.
+  // ============================================================================================================
+  out.legacy_projection = e3 ? {
+    projection_class: e3.projection_class || 'LEGACY_ALLOCATOR_PROJECTION',
+    is_production_generation_authority: e3.is_production_generation_authority === true,
+    verdict: e3.verdict || null,
+    verdict_scope: e3.verdict_scope || 'THIS_PROJECTION_ONLY',
+    next_blocked_stage: e3.next_blocked_stage || null,
+    blockers: (e3.blockers || []).slice(),
+    source_line_count: (e3.source_lines && e3.source_lines.count) || 0,
+    allocated_line_count: (e3.allocated_lines && e3.allocated_lines.this_marketplace) || 0,
+    production_parity_assembled: !!(e3.production_parity && e3.production_parity.assembled === true),
+    note: 'a projection STOP is NOT a production refusal. Read production_path.'
+  } : { projection_class: 'LEGACY_ALLOCATOR_PROJECTION', is_production_generation_authority: false,
+    verdict: null, verdict_scope: 'THIS_PROJECTION_ONLY', next_blocked_stage: null, blockers: [],
+    source_line_count: 0, allocated_line_count: 0, production_parity_assembled: false,
+    note: 'the projection did not run; it is not the production authority either way' };
+  P('the_projection_does_not_claim_production_authority', false,
+    out.legacy_projection.is_production_generation_authority,
+    out.legacy_projection.is_production_generation_authority === false);
+  P('the_projection_verdict_is_scoped_to_itself', 'THIS_PROJECTION_ONLY',
+    out.legacy_projection.verdict_scope, out.legacy_projection.verdict_scope === 'THIS_PROJECTION_ONLY');
   var proposed = (e3 && e3.allocator && e3.allocator.routes) || [];
   out.expected_ai_identities = proposed.map(function (r) {
     var h = { planning_cycle: e3 && e3.planning_cycle, company: R6R7_SCOPE_.company, country: R6R7_SCOPE_.country,
@@ -5837,23 +5916,45 @@ function RUN_R6R7_CONTROLLED_AI_PLAN_PREFLIGHT() {
   //   STOP                      — anything else, INCLUDING the case where this file's own checks all pass
   //                               but production would refuse. That case is the whole reason this exists.
   var pp = out.production_path || {};
-  var wouldWrite = (pp.residual_qty !== null && pp.residual_qty !== undefined && pp.residual_qty > 0);
+  // READ, never re-derived. A refusal can still carry a residual — the recommendation is what could not be
+  // read, not the plan it would have been netted against — so 'there is a residual' is not 'this would run'.
+  var wouldWrite = pp.would_write === true;
   out.parity = {
+    // filled after the verdict is decided, because a parity that reports the verdict must be written after
+    // it exists — the same ordering the projection's blockers list got wrong two rounds ago.
+    wrapper_verdict: null,
+    production_outcome: pp.outcome || null,
+    agree: null,
+    production_would_write: wouldWrite,
     wrapper_own_checks_passed: out.predicates_failed === 0,
     production_path_available: pp.available === true,
     production_path_outcome: pp.outcome || null,
     production_path_code: pp.code || null,
     production_path_reason: pp.reason || null,
-    production_would_write: wouldWrite,
+    production_decision_source: pp.decision_source || null,
+    production_entry_point: pp.entry_point || null,
     rule: 'the wrapper may only report a success this file can point at in the production answer. When the'
       + ' production path would refuse, the wrapper STOPS — a preflight that certifies a run which cannot'
       + ' happen is worse than no preflight.'
   };
+  // THE ONE INVARIANT. Not 'the two agree' — a wrapper is allowed to stop for its own reasons — but that it
+  // is never the MORE PERMISSIVE of the two.
+  P('the_wrapper_reports_the_production_handlers_own_decision',
+    'weeklyAiPlanControlledDecisionFromParts_ (61_)',
+    pp.decision_source ? String(pp.decision_source).split(';')[0] : null,
+    !!pp.decision_source && String(pp.decision_source).indexOf('weeklyAiPlanControlledDecisionFromParts_') === 0);
+  P('the_valid_zero_short_circuit_precedes_the_empty_scope_refusal',
+    'VALID_ZERO_SHORT_CIRCUIT before REQUESTED_SCOPE_EMPTY_REFUSAL',
+    (pp.gate_order || []).join(' > '),
+    (function () { var o = pp.gate_order || [];
+      var a = o.indexOf('VALID_ZERO_SHORT_CIRCUIT'), b = o.indexOf('REQUESTED_SCOPE_EMPTY_REFUSAL');
+      return a >= 0 && b >= 0 && a < b; })());
   P('wrapper_verdict_is_derived_from_the_production_path', true, out.parity.production_path_available,
     out.parity.production_path_available === true);
-  P('production_path_would_not_refuse', 'AI_PLAN_NO_ACTION or a residual to generate',
+  P('production_path_would_not_refuse', 'AI_PLAN_NO_ACTION or WOULD_GENERATE',
     (pp.outcome || 'UNAVAILABLE') + (wouldWrite ? ' (residual ' + pp.residual_qty + ')' : ''),
-    pp.available === true && (pp.outcome === 'AI_PLAN_NO_ACTION' || wouldWrite));
+    pp.available === true
+      && (pp.outcome === 'AI_PLAN_NO_ACTION' || (pp.outcome === 'WOULD_GENERATE' && wouldWrite)));
 
   if (out.predicates_failed !== 0) {
     out.verdict = 'STOP';
@@ -5861,31 +5962,60 @@ function RUN_R6R7_CONTROLLED_AI_PLAN_PREFLIGHT() {
       + out.predicates.filter(function (p) { return !p.pass; }).map(function (p) { return p.predicate; }).join(', ');
   } else if (pp.outcome === 'AI_PLAN_NO_ACTION') {
     out.verdict = 'READY_NO_ACTION';
-  } else {
+  } else if (pp.outcome === 'WOULD_GENERATE' && wouldWrite) {
     out.verdict = 'CONTROLLED_AI_PLAN_READY';
+  } else {
+    // The else branch used to be the success. Any outcome that is not one of the two named above — a
+    // refusal, an UNAVAILABLE, a WOULD_GENERATE with nothing to generate — is a STOP, by name.
+    out.verdict = 'STOP';
+    out.stop_reason = 'PRODUCTION_PATH_WOULD_NOT_RUN: ' + (pp.outcome || 'UNAVAILABLE')
+      + (pp.code ? ' / ' + pp.code : '') + (pp.reason ? ' (' + pp.reason + ')' : '')
+      + '. A preflight may not report a success this file cannot point at in the production answer.';
   }
+  out.parity.wrapper_verdict = out.verdict;
+  out.parity.agree = (out.verdict === 'READY_NO_ACTION' && pp.outcome === 'AI_PLAN_NO_ACTION')
+    || (out.verdict === 'CONTROLLED_AI_PLAN_READY' && pp.outcome === 'WOULD_GENERATE' && wouldWrite === true)
+    || out.verdict === 'STOP';
+  out.parity.wrapper_never_outranks_production =
+    out.verdict === 'STOP' || (pp.available === true && pp.outcome !== 'REFUSAL');
   return CENSUS_r6r7Finish_(out);
 }
 
 /**
- * §F — ASK 61_ WHAT IT WOULD ANSWER. Read-only, and it constructs no writer: the three functions called
- * here are pure classifiers over rows this census has already read, and the only sheet access is through
- * 61_'s own reader.
+ * §F — ASK 61_ WHAT IT WOULD ANSWER, AND REPORT ITS ANSWER RATHER THAN AN EQUIVALENT ONE.
+ *
+ * R6-R7-R2. This function used to call 61_'s classifiers and then decide for itself that a no-action means
+ * AI_PLAN_NO_ACTION / NO_REPLENISHMENT_REQUIRED and a missing recommendation means REQUESTED_SCOPE_EMPTY.
+ * Those strings were correct on the day they were typed and nothing kept them correct: a second mapping of
+ * one decision is precisely the divergence the parity block exists to catch, moved one level inward where
+ * the parity block cannot see it.
+ *
+ * It now calls weeklyAiPlanControlledDecision_ — the SAME builder the public handler returns its envelope
+ * from — and copies the fields out. There is no outcome or code spelled in this file any more.
+ *
+ * Read-only, and it constructs no writer: the decision reads through 61_'s own canonical reader and pure
+ * classifiers, and nothing on that path can reach PASS 2.
  */
 function CENSUS_r6r7ProductionPath_() {
-  var out = { available: false, unavailable_reason: null, outcome: null, code: null, reason: null,
-    recommendation_state: null, recommended_qty: null, qualifying_planned_qty: null, residual_qty: null,
-    per_scope: [], authority: null, db_writes: 0, writer_reached: false };
+  var out = { available: false, unavailable_reason: null,
+    entry_point: null,   // copied from the production decision; never spelled here
+    decision_source: null,
+    outcome: null, code: null, reason: null,
+    recommendation_state: null, recommended_qty: null,
+    qualifying_active_planned_qty: null, qualifying_planned_qty: null, residual_qty: null,
+    per_scope: [], missing_reasons: [], authority: null,
+    would_write: false, writer_reached: false, db_writes: 0,
+    requested_scope_empty_is_bypassed_by_valid_zero: false, gate_order: [],
+    production_response: null, production_refusal: null };
   var missing = [];
-  if (typeof weeklyAiPlanRecommendationState_ !== 'function') missing.push('weeklyAiPlanRecommendationState_');
-  if (typeof weeklyAiPlanQualifyingPlannedQty_ !== 'function') missing.push('weeklyAiPlanQualifyingPlannedQty_');
-  if (typeof weeklyAiPlanNoActionDecision_ !== 'function') missing.push('weeklyAiPlanNoActionDecision_');
-  if (typeof weeklyAiPlanTargetScopes_ !== 'function') missing.push('weeklyAiPlanTargetScopes_');
-  if (typeof weeklyAiPlanCanonicalDemand_ !== 'function') missing.push('weeklyAiPlanCanonicalDemand_');
+  // The ONE function that has to exist, because it is the one the handler goes through. Asking for the
+  // classifiers individually would let a project answer with a decision this file assembled itself.
+  if (typeof weeklyAiPlanControlledDecision_ !== 'function') missing.push('weeklyAiPlanControlledDecision_');
+  if (typeof weeklyAiPlanControlledDecisionFromParts_ !== 'function') missing.push('weeklyAiPlanControlledDecisionFromParts_');
   if (missing.length) {
     out.unavailable_reason = 'PRODUCTION_AUTHORITY_NOT_SYNCED: ' + missing.join(', ')
-      + '. This project does not carry the R6-R7-R1 no-action authority, so the production answer cannot be'
-      + ' asked for — which is NOT the same as it being yes.';
+      + '. This project does not carry the R6-R7-R2 shared decision builder, so the production answer cannot'
+      + ' be asked for — which is NOT the same as it being yes. Sync 61_api_v1_weekly_ai_plan.gs.';
     return out;
   }
   var cycle = null;
@@ -5899,42 +6029,47 @@ function CENSUS_r6r7ProductionPath_() {
   try { ss = SpreadsheetApp.openById(prodExpectedDbId_());
     if (typeof prodAssertDbTarget_ === 'function') prodAssertDbTarget_(ss, prodExpectedDbId_()); }
   catch (eO) { out.unavailable_reason = 'PRODUCTION_DATABASE_UNREACHABLE: ' + CENSUS_str_(eO && eO.message); return out; }
-  var canonical, target, recState, planned, decision;
+  var calcDate = null;
   try {
-    var calcDate = null;
-    try {
-      var cc2 = (typeof gapCalcResolveContext_ === 'function') ? gapCalcResolveContext_('INVENTORY') : null;
-      calcDate = (cc2 && cc2.ok) ? cc2.calculationDate : null;
-    } catch (eD) { calcDate = null; }
-    canonical = weeklyAiPlanCanonicalDemand_(ss, scope, calcDate);
-    target = weeklyAiPlanTargetScopes_(scope, scope.marketplace);
-    recState = weeklyAiPlanRecommendationState_(canonical, target);
-    planned = weeklyAiPlanQualifyingPlannedQty_(ss, scope);
-    decision = weeklyAiPlanNoActionDecision_(recState, planned);
-  } catch (eX) {
+    var cc2 = (typeof gapCalcResolveContext_ === 'function') ? gapCalcResolveContext_('INVENTORY') : null;
+    calcDate = (cc2 && cc2.ok) ? cc2.calculationDate : null;
+  } catch (eD) { calcDate = null; }
+  var d;
+  try { d = weeklyAiPlanControlledDecision_(ss, scope, R6R7_SCOPE_.marketplace, calcDate); }
+  catch (eX) {
     out.unavailable_reason = 'PRODUCTION_AUTHORITY_THREW: ' + CENSUS_str_(eX && eX.message);
     return out;
   }
-  out.available = true;
-  out.recommendation_state = decision.recommendation_state;
-  out.recommended_qty = decision.recommended_qty;
-  out.qualifying_planned_qty = decision.qualifying_planned_qty;
-  out.residual_qty = decision.residual_qty;
-  out.per_scope = decision.per_scope || [];
-  out.reason = decision.reason;
-  out.authority = { rule: recState.authority_rule, accepted_calculation_date: recState.accepted_calculation_date,
-    current_run: recState.current_run, per_scope: recState.per_scope,
-    qualification: planned.authority, planned_rows: planned.rows, planned_excluded: planned.excluded };
-  if (decision.noAction) {
-    out.outcome = 'AI_PLAN_NO_ACTION';
-    out.code = 'NO_REPLENISHMENT_REQUIRED';
-  } else if (decision.recommendation_state === 'MISSING_RECOMMENDATION') {
-    out.outcome = 'REFUSAL';
-    out.code = 'REQUESTED_SCOPE_EMPTY';
-  } else {
-    out.outcome = 'WOULD_GENERATE';
-    out.code = null;
+  if (!d || d.available !== true) {
+    out.unavailable_reason = (d && d.unavailable_reason)
+      || 'PRODUCTION_AUTHORITY_RETURNED_NOTHING_USABLE';
+    return out;
   }
+  // COPIED, not re-derived. Every field below is the production decision's own.
+  out.available = true;
+  out.entry_point = d.entry_point;
+  out.decision_source = d.decision_source;
+  out.outcome = d.outcome;
+  out.code = d.code;
+  out.reason = d.reason;
+  out.recommendation_state = d.recommendation_state;
+  out.recommended_qty = d.recommended_qty;
+  out.qualifying_active_planned_qty = d.qualifying_active_planned_qty;
+  out.qualifying_planned_qty = d.qualifying_planned_qty;
+  out.residual_qty = d.residual_qty;
+  out.per_scope = d.per_scope || [];
+  out.missing_reasons = d.missing_reasons || [];
+  out.would_write = d.would_write === true;
+  out.writer_reached = d.writer_reached === true;
+  out.db_writes = CENSUS_num_(d.db_writes) || 0;
+  out.requested_scope_empty_is_bypassed_by_valid_zero =
+    d.requested_scope_empty_is_bypassed_by_valid_zero === true;
+  out.gate_order = d.gate_order || [];
+  out.authority = d.authority || null;
+  // The envelope the handler would actually return, reported field for field rather than described. A
+  // preflight that says 'zero writes' and cannot show the response saying it has asserted, not measured.
+  out.production_response = d.response ? d.response.data : null;
+  out.production_refusal = d.refusal ? d.refusal.errors[0] : null;
   return out;
 }
 
@@ -6191,6 +6326,24 @@ function RUN_R6R7_CONTROLLED_AI_PLAN_READBACK() {
   return CENSUS_r6r7Finish_(out);
 }
 
+// ================================================================================================================
+// R6-R7-R2 — THE EXPORT IS WHAT AN AUDITOR READS, AND IT WAS A FIXED LIST WRITTEN BEFORE THE EVIDENCE EXISTED.
+//
+// The live run held `production_path` and `parity` on the returned object and printed neither, because this
+// list was written in R6-R7 and the two fields arrived in R6-R7-R1. Nothing failed. The preflight reported
+// READY_NO_ACTION and the one line a reader would audit could not say what production had answered — which
+// is indistinguishable, from the outside, from the wrapper having decided on its own.
+//
+// A whitelist that silently drops new evidence is the defect, not the missing entries. So each census
+// DECLARES the fields its verdict rests on, and omitting one is a STOP with a named reason rather than a
+// quieter report.
+// ================================================================================================================
+var R6R7_REQUIRED_EXPORT_ = {
+  RUN_R6R7_CONTROLLED_AI_PLAN_PREFLIGHT: ['production_path', 'parity'],
+  RUN_R6R7_RECOMMENDATION_AUTHORITY_CENSUS: ['suggested_qty', 'disputed_value_provenance', 'current_run'],
+  RUN_R6R7_CONTROLLED_AI_PLAN_READBACK: ['counts']
+};
+
 // The shared exit. Asserts the read-only facts on the way out and prints ONE complete line to the log, because
 // the Apps Script editor shows the execution log and not the returned object.
 function CENSUS_r6r7Finish_(out) {
@@ -6202,24 +6355,48 @@ function CENSUS_r6r7Finish_(out) {
   out.reservation_writes = CENSUS_num_(out.reservation_writes) || 0;
   CENSUS_log_('r6r7', out.census + ' ' + out.verdict + ' — passed ' + out.predicates_passed
     + ' failed ' + out.predicates_failed);
-  try {
-    CENSUS_log_('r6r7_export', JSON.stringify({
-      census: out.census, build: out.build, verdict: out.verdict,
-      predicates_passed: out.predicates_passed, predicates_failed: out.predicates_failed,
-      db_writes: out.db_writes, writer_calls: out.writer_calls, writer_constructed: out.writer_constructed,
-      submit_calls: out.submit_calls, route_save_calls: out.route_save_calls || 0,
-      reservation_writes: out.reservation_writes,
-      scope: out.scope || null,
-      suggested_qty: out.suggested_qty || null,
-      zero_recommendation_classification: out.zero_recommendation_classification || null,
-      disputed_value_provenance: out.disputed_value_provenance || null,
-      manual_route_snapshots: out.manual_route_snapshots || out.manual_routes_observed || null,
-      expected_ai_identities: out.expected_ai_identities || null,
-      ai_rows_observed: out.ai_rows_observed || null,
-      counts: out.counts || out.before_counts || null,
-      stop_reason: out.stop_reason || ''
-    }));
-  } catch (eX) { CENSUS_log_('r6r7_export_failed', CENSUS_str_(eX && eX.message)); }
+  // THE DECLARED EVIDENCE MUST BE THERE BEFORE THE VERDICT STANDS.
+  var required = R6R7_REQUIRED_EXPORT_[out.census] || [];
+  var absent = required.filter(function (k) { return out[k] === null || out[k] === undefined; });
+  out.export_complete = absent.length === 0;
+  if (!out.export_complete) {
+    out.export_missing = absent;
+    out.verdict = 'STOP';
+    out.stop_reason = (out.stop_reason ? out.stop_reason + ' ' : '')
+      + 'EXPORT_INCOMPLETE: ' + absent.join(', ') + ' — this census\'s verdict rests on evidence it did not'
+      + ' report, and a verdict a reader cannot check is not one.';
+    CENSUS_log_('r6r7_export_incomplete', absent.join(', '));
+  }
+  var payload = {
+    census: out.census, build: out.build, verdict: out.verdict,
+    predicates_passed: out.predicates_passed, predicates_failed: out.predicates_failed,
+    db_writes: out.db_writes, writer_calls: out.writer_calls, writer_constructed: out.writer_constructed,
+    submit_calls: out.submit_calls, route_save_calls: out.route_save_calls || 0,
+    reservation_writes: out.reservation_writes,
+    scope: out.scope || null,
+    suggested_qty: out.suggested_qty || null,
+    current_run: out.current_run || null,
+    zero_recommendation_classification: out.zero_recommendation_classification || null,
+    disputed_value_provenance: out.disputed_value_provenance || null,
+    manual_route_snapshots: out.manual_route_snapshots || out.manual_routes_observed || null,
+    expected_ai_identities: out.expected_ai_identities || null,
+    ai_rows_observed: out.ai_rows_observed || null,
+    counts: out.counts || out.before_counts || null,
+    // R6-R7-R2 — THE TWO OBJECTS THIS ROUND EXISTS TO PUT IN FRONT OF A READER.
+    production_path: out.production_path || null,
+    parity: out.parity || null,
+    legacy_projection: out.legacy_projection || null,
+    export_complete: out.export_complete,
+    export_missing: out.export_missing || [],
+    stop_reason: out.stop_reason || ''
+  };
+  try { CENSUS_log_('r6r7_export', JSON.stringify(payload)); }
+  catch (eX) {
+    CENSUS_log_('r6r7_export_failed', CENSUS_str_(eX && eX.message));
+    // A payload too large to stringify must still deliver the parity, or the round has no evidence at all.
+    try { CENSUS_log_('r6r7_export_minimal', JSON.stringify({ census: out.census, verdict: out.verdict,
+      production_path: payload.production_path, parity: payload.parity })); } catch (eY) {}
+  }
   (out.predicates || []).forEach(function (p) {
     if (!p.pass) CENSUS_log_('r6r7_failed', p.predicate + ': expected ' + JSON.stringify(p.expected)
       + ' observed ' + JSON.stringify(p.observed));

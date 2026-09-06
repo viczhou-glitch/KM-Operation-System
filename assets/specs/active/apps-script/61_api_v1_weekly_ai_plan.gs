@@ -231,7 +231,7 @@ function handleGenerateWeeklyAiPlanDraft_(body) {
 // (AI_PLAN_NO_ACTION, zero writes) instead of a REQUESTED_SCOPE_EMPTY refusal, and the canonical demand is
 // netted by the qualifying MANUAL plan before the allocator sizes anything. A stamp records the round a
 // module last changed; it is not the release.
-var WAP_BUILD_VERSION_ = 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R7-R1';
+var WAP_BUILD_VERSION_ = 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R7-R2';
 
 // F1-7N-FA-3C-R6F2 — K2 route-group generation (reached ONLY when INVENTORY_AI_PLAN_DB_GENERATION_ENABLED_ = true).
 // per-source lines (KMWRB.buildWeeklySourceLines) → route derivation + K2 partition (KMWRR, per marketplace) →
@@ -1203,14 +1203,13 @@ function weeklyAiPlanGenerateK2_(ss, request, harvest, deps, body, controlledAut
       }
       // Still a refusal — and it now says WHY it could not be read as a zero, so the two are never
       // confused again by anyone reading this response.
-      return jsonResponse_({ success: false, zero_write: true,
-        errors: [weeklyAiPlanErr_('REQUESTED_SCOPE_EMPTY',
-          'requested marketplace produced no allocated lines: ' + requestedMkt
-            + ' (and the canonical recommendation could not be read as a valid zero: ' + _na.reason + ')',
-          { recommendation_state: _na.recommendation_state, no_action_reason: _na.reason,
-            missing_reasons: _na.missing_reasons || [], recommended_qty: _na.recommended_qty,
-            qualifying_planned_qty: _na.qualifying_planned_qty, residual_qty: _na.residual_qty,
-            recommendation_authority: harvest.recommendationState || null, db_writes: 0 })] });
+      //
+      // R6-R7-R2: built by the SHARED builder, which is also where a preflight reads this code from. A
+      // diagnostic that spelled 'REQUESTED_SCOPE_EMPTY' itself would keep reporting it after this line
+      // changed, and nothing would notice.
+      return jsonResponse_(weeklyAiPlanScopeEmptyRefusal_(_na, {
+        requested_marketplace: requestedMkt,
+        recommendation_authority: harvest.recommendationState || null }));
     }
     var only = {}; only[requestedMkt] = byMkt[requestedMkt]; byMkt = only;   // fail-closed: never generate outside the frozen marketplace
   }
@@ -2557,6 +2556,145 @@ function weeklyAiPlanNoActionResponse_(decision, ctx) {
  *
  * Returns { noDemand: bool, reason, receiverCount, basisTotal, gapTotal, positiveGapRefs[] }.
  */
+// ================================================================================================================
+// R6-R7-R2 — THE HANDLER'S ANSWER HAS ONE BUILDER, AND A DIAGNOSTIC MAY ONLY REPORT WHAT IT RETURNS.
+//
+// R6-R7-R1 put the no-action short circuit in the production handler and then had the preflight ask 61_'s
+// classifiers directly and map their result to an outcome ITSELF. Two mappings for one decision is the same
+// defect the parity check exists to catch, one level further in: they agreed on the day they were written,
+// and nothing made them keep agreeing. The live run then showed it from the other side — the wrapper said
+// READY_NO_ACTION while the log beside it still carried a STOP, and the export a reader would audit carried
+// neither the outcome nor the parity.
+//
+// So the decision is built HERE, once, and the outcome and code are read back OUT OF THE ACTUAL ENVELOPES the
+// handler returns — not restated next to them. A diagnostic that wants to know what production would
+// answer calls this and reports its fields; it has no mapping of its own to drift.
+// ================================================================================================================
+
+/**
+ * The refusal envelope, extracted so that the ONE place a REQUESTED_SCOPE_EMPTY is worded is also the place a
+ * diagnostic reads its code from. It keeps `zero_write: true` and names WHY the row could not be read as a
+ * valid zero, because 'produced no allocated lines' on its own is what made a correct finish and a real fault
+ * indistinguishable.
+ */
+function weeklyAiPlanScopeEmptyRefusal_(decision, ctx) {
+  ctx = ctx || {};
+  return { success: false, zero_write: true,
+    errors: [weeklyAiPlanErr_('REQUESTED_SCOPE_EMPTY',
+      'requested marketplace produced no allocated lines: ' + weeklyAiPlanStr_(ctx.requested_marketplace)
+        + ' (and the canonical recommendation could not be read as a valid zero: ' + decision.reason + ')',
+      { recommendation_state: decision.recommendation_state, no_action_reason: decision.reason,
+        missing_reasons: decision.missing_reasons || [], recommended_qty: decision.recommended_qty,
+        qualifying_planned_qty: decision.qualifying_planned_qty, residual_qty: decision.residual_qty,
+        recommendation_authority: ctx.recommendation_authority || null, db_writes: 0 })] };
+}
+
+/** The order the public handler applies these gates in, stated as data so a claim about it can be checked
+ *  rather than believed. Index 0 runs first. */
+var WAP_CONTROLLED_GATE_ORDER_ = [
+  'FLAG_GATE',                       // staged off -> nothing runs at all
+  'HARVEST_AND_CANONICAL_AUTHORITY', // the row is read; the decision below is resolved from it
+  'VALID_ZERO_SHORT_CIRCUIT',        // AI_PLAN_NO_ACTION returns here, with zero writes
+  'REQUESTED_SCOPE_EMPTY_REFUSAL',   // only reached when the row could NOT be read as a valid zero
+  'ALLOCATOR_MARKETPLACE_FILTER',
+  'PASS_2_WRITER'
+];
+
+/**
+ * THE DECISION OBJECT. Everything a caller — the handler, a preflight, a test — needs in order to say what
+ * this run would do, with `outcome` and `code` taken from the envelopes themselves.
+ *
+ * `would_write` is deliberately narrow: it is true only when there is a residual to generate. A refusal does
+ * not write and neither does a no-action, and collapsing those two into 'not writing' is how a preflight ends
+ * up certifying a run that cannot happen.
+ */
+function weeklyAiPlanControlledDecisionFromParts_(decision, ctx) {
+  ctx = ctx || {};
+  var out = {
+    available: true, unavailable_reason: null,
+    // The PUBLIC entry point, named as the router actually binds it. 'the AI Plan handler' is not an address;
+    // a reader has to be able to find the same door this decision was resolved behind.
+    entry_point: 'KM.DB.generateWeeklyAiPlanDraft -> POST action=weeklyAiPlan.generate (01_router.gs)'
+      + ' -> handleGenerateWeeklyAiPlanDraft_ -> weeklyAiPlanGenerateK2_ (61_)',
+    decision_source: 'weeklyAiPlanControlledDecisionFromParts_ (61_) — the same builder the handler'
+      + ' returns its envelope from; a caller reports these fields and maps nothing itself',
+    outcome: null, code: null, reason: decision ? decision.reason : null,
+    recommendation_state: decision ? decision.recommendation_state : null,
+    recommended_qty: decision ? decision.recommended_qty : null,
+    qualifying_active_planned_qty: decision ? decision.qualifying_planned_qty : null,
+    // the historical field name, kept so an existing reader does not silently read undefined
+    qualifying_planned_qty: decision ? decision.qualifying_planned_qty : null,
+    residual_qty: decision ? decision.residual_qty : null,
+    per_scope: (decision && decision.per_scope) || [],
+    missing_reasons: (decision && decision.missing_reasons) || [],
+    would_write: false, writer_reached: false, db_writes: 0,
+    requested_scope_empty_is_bypassed_by_valid_zero: false,
+    gate_order: WAP_CONTROLLED_GATE_ORDER_.slice(),
+    response: null, refusal: null
+  };
+  if (!decision) {
+    out.available = false;
+    out.unavailable_reason = 'NO_DECISION: the canonical authority produced nothing to report';
+    return out;
+  }
+  if (decision.noAction) {
+    out.response = weeklyAiPlanNoActionResponse_(decision, ctx);
+    out.outcome = out.response.data.outcome;
+    out.code = out.response.data.code;
+    out.writer_reached = out.response.data.writer_reached === true;
+    out.db_writes = out.response.data.db_writes;
+    // The short circuit is ordered BEFORE the refusal (see WAP_CONTROLLED_GATE_ORDER_), so when the requested
+    // marketplace allocates nothing this answers first and REQUESTED_SCOPE_EMPTY never fires.
+    out.requested_scope_empty_is_bypassed_by_valid_zero = true;
+    return out;
+  }
+  if (decision.recommendation_state === WAP_RECOMMENDATION_STATES_.MISSING) {
+    out.refusal = weeklyAiPlanScopeEmptyRefusal_(decision, ctx);
+    out.outcome = 'REFUSAL';
+    out.code = out.refusal.errors[0].code;
+    return out;
+  }
+  out.outcome = 'WOULD_GENERATE';
+  out.would_write = weeklyAiPlanQty_(decision.residual_qty) > 0;
+  return out;
+}
+
+/**
+ * The same decision, resolved from the database for a caller that has no harvest — a preflight. It reads
+ * through 61_'s OWN canonical reader, target-scope guard, state classifier and qualifying-plan reader: the
+ * functions the harvest itself calls, so this is the production answer and not a reconstruction of it.
+ *
+ * READ-ONLY by construction. No writer is built, KMWRB/KMWRR are not called, and nothing here reaches PASS 2.
+ */
+function weeklyAiPlanControlledDecision_(ss, scope, requestedMarketplace, calcDate) {
+  var canonical, target, recState, planned, decision;
+  try {
+    canonical = weeklyAiPlanCanonicalDemand_(ss, scope, calcDate || null);
+    target = weeklyAiPlanTargetScopes_(scope, requestedMarketplace
+      || (scope && scope.marketplace) || '');
+    recState = weeklyAiPlanRecommendationState_(canonical, target);
+    planned = weeklyAiPlanQualifyingPlannedQty_(ss, scope);
+    decision = weeklyAiPlanNoActionDecision_(recState, planned);
+  } catch (e) {
+    return { available: false, unavailable_reason: 'PRODUCTION_AUTHORITY_THREW: '
+      + weeklyAiPlanStr_(e && e.message), outcome: null, code: null, reason: null,
+      recommendation_state: null, recommended_qty: null, qualifying_active_planned_qty: null,
+      qualifying_planned_qty: null, residual_qty: null, per_scope: [], would_write: false,
+      writer_reached: false, db_writes: 0, requested_scope_empty_is_bypassed_by_valid_zero: false,
+      gate_order: WAP_CONTROLLED_GATE_ORDER_.slice(), response: null, refusal: null };
+  }
+  var out = weeklyAiPlanControlledDecisionFromParts_(decision, {
+    planning_cycle: scope && scope.planningCycle, scope: scope,
+    requested_marketplace: requestedMarketplace || (scope && scope.marketplace) || '',
+    recommendation_authority: recState });
+  out.authority = { rule: recState.authority_rule,
+    accepted_calculation_date: recState.accepted_calculation_date,
+    current_run: recState.current_run, per_scope: recState.per_scope,
+    qualification: planned.authority, planned_rows: planned.rows,
+    planned_excluded: planned.excluded, provenance_authority: planned.provenance_authority };
+  return out;
+}
+
 function weeklyAiPlanNoDemandVerdict_(h, mapped) {
   var out = { noDemand: false, reason: null, receiverCount: 0, basisTotal: 0, gapTotal: 0, positiveGapRefs: [] };
   var kmaf = (h && h.kmaf) || {};
