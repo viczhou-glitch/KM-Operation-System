@@ -1047,6 +1047,14 @@ ok(/function TEMP_AI_PLAN_ACTIVATION_CENSUS_FC1B_E3\(args\)/.test(TEMP), 'F1  th
     'RUN_R6R6_MANUAL_ROUTE_SAVE_FROZEN_READINESS',
     'RUN_R6R6_MANUAL_ROUTE_SAVE_PREFLIGHT', 'RUN_R6R6_MANUAL_ROUTE_SAVE_READBACK',
     'RUN_R6R6_MANUAL_ROUTE_SAVE_READBACK_FROZEN',
+    // R6-R7 adds four: the recommendation-authority census that settles which rule owns the number on the
+    // screen, the controlled AI Plan preflight, the activation DESIGN, and the readback contract. All four
+    // are read-only, take no arguments and inherit the one hard-coded scope; none of them has a write path,
+    // and the writer count elsewhere in this project still reads ONE — R6-R6-R3's, unchanged. They sit
+    // AFTER the RUN_R6R6_* block: '_' (95) sorts after 'R' (82), so RUN_R6R6R4 precedes RUN_R6R6_MANUAL,
+    // and '7' (55) after '6' (54) puts RUN_R6R7 after both.
+    'RUN_R6R7_CONTROLLED_ACTIVATION_MANIFEST', 'RUN_R6R7_CONTROLLED_AI_PLAN_PREFLIGHT',
+    'RUN_R6R7_CONTROLLED_AI_PLAN_READBACK', 'RUN_R6R7_RECOMMENDATION_AUTHORITY_CENSUS',
     'TEMP_AI_PLAN_ACTIVATION_CENSUS_FC1B_E3'];
   eq(nonHelper.slice().sort(), ALLOWED_ENTRY_POINTS,
     'F1a and those are the ONLY functions not prefixed CENSUS_ — nothing else is invocable from the editor by accident');

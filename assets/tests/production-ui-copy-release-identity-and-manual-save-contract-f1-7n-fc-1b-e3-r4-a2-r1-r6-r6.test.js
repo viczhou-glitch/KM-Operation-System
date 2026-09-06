@@ -590,8 +590,11 @@ ok(/function RUN_R6R6_MANUAL_ROUTE_SAVE_READBACK_FROZEN\(\)/.test(CENSUS),
 // The freeze is SOURCE. A value a later run could have written is not a BEFORE.
 // Comment-stripped, because the round's own note on why it uses none of these necessarily names all of them.
 var CENSUS_CODE = CENSUS.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/[^\n]*/g, '$1 ');
-ok(!/CacheService|PropertiesService|ScriptProperties|UserProperties/.test(CENSUS_CODE),
-  'R2  the snapshot uses no CacheService, PropertiesService or other persisted state');
+// R6-R7 — A MEMBER ACCESS, not a mention. Every one of these four can only be USED by reaching through it,
+// so that is what is forbidden. Naming a store in a sentence the census returns — to tell an operator where a
+// run identity lives — is the opposite of reading from it, and the property here is about reading.
+ok(!/(CacheService|PropertiesService|ScriptProperties|UserProperties)\s*\./.test(CENSUS_CODE),
+  'R2  the snapshot READS no CacheService, PropertiesService or other persisted state');
 var frozenFn = extractFn(CENSUS, 'RUN_R6R6_MANUAL_ROUTE_SAVE_READBACK_FROZEN');
 ok(!/appendRow|setValues|setValue\(/.test(frozenFn), 'R2a and it contains no write primitive');
 

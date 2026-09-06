@@ -67,7 +67,7 @@
 // §9 — THE CENSUS WAS REPORTING A BUILD IT NO LONGER WAS. Its behaviour changed in A2-R1-R1 (it learned to
 // read the harvest REFUSAL) and again in A2-R1-R2 (route intent + identity preview) while this literal stayed
 // at A2-R1, so a log could not be matched to the code that produced it. It moves with the file now.
-var TEMP_E3_CENSUS_BUILD_ = 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R6-R4-R2';
+var TEMP_E3_CENSUS_BUILD_ = 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R7';
 
 /** Read-only row reader. The Sheet object stays inside this function — the caller gets values, never a writer. */
 // R6-R3 §2 — the OPTIONAL third argument is a metrics sink. §2 requires the diagnostic to report how many
@@ -2655,6 +2655,13 @@ function RUN_R6R2_ROUTE_PROVENANCE() {
           status: CENSUS_str_(vh.status),
           line_status: CENSUS_str_(vl.line_status),
           generation_type: CENSUS_str_(vh.generation_type || vh.source_type),
+          // R6-R7 §4 — ADDITIVE, and load-bearing. The deterministic identity's LAST dimension is
+          // recommendation_group_no: a manual save never sends one and every generated group carries an
+          // ordinal, which is the mechanism by which a generation cannot land on a manual route's row.
+          // The run id was previously readable only inside the `ownership` sentence; a predicate cannot
+          // compare a sentence.
+          recommendation_group_no: CENSUS_str_(vh.recommendation_group_no),
+          generation_run_id: CENSUS_str_(vh.generation_run_id),
           ownership: CENSUS_str_(vh.generation_run_id)
             ? ('AI_GENERATED (generation_run_id ' + CENSUS_str_(vh.generation_run_id) + ')')
             : 'MANUAL (no generation_run_id — composed by a person)',
@@ -4638,8 +4645,9 @@ function RUN_R6R6R4_SINGLE_ROW_SAVE_READINESS() {
     route_b_frozen: R6R6R4_B_BEFORE_, route_b_observed: null,
     already_saved: false,
     stage_two_authorized: false,
-    stage_two: 'parcel -> truck, version 3 -> 4, is DESIGNED and NOT AUTHORIZED this round. See'
-      + ' RUN_R6R6R4_RESTORE_STAGE_TWO_MANIFEST.',
+    stage_two: 'parcel -> truck, version 3 -> 4, HAS BEEN EXECUTED and read back (R6-R7 §0). This'
+      + ' readiness is CLOSED: its frozen BEFORE describes Route A at parcel/version 3, and Route A is now'
+      + ' truck at version 4, so a run reports the difference. That is the honest answer, not a fault.',
     frozen_snapshot_source: '',
     verdict: 'STOP', stop_reason: ''
   };
@@ -4865,10 +4873,18 @@ function RUN_R6R6R4_RESTORE_STAGE_TWO_MANIFEST() {
     build: TEMP_E3_CENSUS_BUILD_,
     read_only: true, db_writes: 0, writer_constructed: false, writer_calls: 0,
     submit_calls: 0, reservation_writes: 0, carrier_master_data_writes: 0,
-    authorized: false,          // ALWAYS false in this round.
-    executed: false,            // ALWAYS false. There is no write path in this function.
-    blocked_by: 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R6-R4 §7 authorizes stage one only. Stage two requires stage'
-      + ' one to have returned SINGLE_ROW_MUTATION_CONFIRMED and a separate current-turn authorization.',
+    // R6-R7 §0 — STAGE TWO HAPPENED. These two booleans were correct when they were written and are
+    // now a false report, so they are replaced by the record that separates the thing they conflated:
+    // whether THIS FILE authorizes a write (it never does, and `self_authorizing` says so) from whether
+    // the operation was performed and confirmed (it was, under the operator's own authorization).
+    authorized: R6R7_STAGE_TWO_OUTCOME_.authorized_externally,
+    executed: R6R7_STAGE_TWO_OUTCOME_.executed,
+    readback_confirmed: R6R7_STAGE_TWO_OUTCOME_.readback_confirmed,
+    self_authorizing: false,
+    outcome: R6R7_STAGE_TWO_OUTCOME_,
+    blocked_by: 'NOTHING REMAINS BLOCKED. Stage two (parcel -> truck, version 3 -> 4) was authorized'
+      + ' externally, executed once, and read back. This manifest is now the HISTORICAL record of that'
+      + ' operation, not a request for permission.',
     precondition: 'THREE things, all of them: (1) RUN_R6R6R4_SINGLE_ROW_SAVE_READINESS returns'
       + ' SINGLE_ROW_SAVE_READY with zero failed predicates; (2) the R6-R6-R4-R2 fix is DEPLOYED — the page'
       + ' carries data-draft-version and 16_ refuses an UPDATE_EXISTING_ROUTE with no expected_draft_version;'
@@ -4917,7 +4933,7 @@ function RUN_R6R6R4_RESTORE_STAGE_TWO_MANIFEST() {
       success_verdict: 'SINGLE_ROW_MUTATION_CONFIRMED'
     },
     ui_note: 'Route A may display a last mile before and after either stage. The display is not the column.',
-    verdict: 'STAGE_TWO_DESIGNED_NOT_AUTHORIZED'
+    verdict: 'STAGE_TWO_EXECUTED_AND_CONFIRMED'
   };
   CENSUS_log_('r6r6r4_stage_two', out.verdict + ' — ' + out.blocked_by);
   return out;
@@ -4931,7 +4947,13 @@ function CENSUS_r6r6r4Finish_(out) {
   out.writer_calls = CENSUS_num_(out.writer_calls) || 0;
   out.submit_calls = CENSUS_num_(out.submit_calls) || 0;
   out.reservation_writes = CENSUS_num_(out.reservation_writes) || 0;
-  out.stage_two_authorized = false;
+  // R6-R7 §0 — it is no longer a constant false. What this file can still assert unconditionally is
+  // that IT did not authorize anything; whether the operation happened is a separate fact with a separate
+  // owner, and collapsing the two into one boolean is what made the report false.
+  out.stage_two_authorized = R6R7_STAGE_TWO_OUTCOME_.authorized_externally === true;
+  out.stage_two_authorized_by_this_file = false;
+  out.stage_two_executed = R6R7_STAGE_TWO_OUTCOME_.executed === true;
+  out.stage_two_readback_confirmed = R6R7_STAGE_TWO_OUTCOME_.readback_confirmed === true;
   CENSUS_log_('r6r6r4', out.census + ' ' + out.verdict + ' — passed ' + out.predicates_passed
     + ' failed ' + out.predicates_failed);
   // §4 — THE COMPLETE EXPORT, IN THE LOG. The editor's Run button shows the execution log and not the
@@ -4954,6 +4976,1017 @@ function CENSUS_r6r6r4Finish_(out) {
   if (out.snapshot_gaps.length) CENSUS_log_('r6r6r4_snapshot_gaps', out.snapshot_gaps.join(', '));
   out.predicates.forEach(function (p) {
     if (!p.pass) CENSUS_log_('r6r6r4_failed', p.predicate + ': expected ' + JSON.stringify(p.expected)
+      + ' observed ' + JSON.stringify(p.observed));
+  });
+  return out;
+}
+
+// ================================================================================================================
+// F1-7N-FC-1B-E3-R4-A2-R1-R6-R7 — CONTROLLED AI PLAN PRODUCTION READINESS
+//
+// §0 — WHAT R6-R6-R4 ACTUALLY ENDED AS, RECORDED SO THE DIAGNOSTIC STOPS SAYING SOMETHING FALSE.
+//
+// The R6-R6-R4 family carried `stage_two_authorized: false` and `authorized/executed: false` as CONSTANTS,
+// because in the round that wrote them stage two had not been authorized and this file has no authority to
+// authorize anything. Both stages have since been performed in production under the user's own authorization
+// and read back: truck -> parcel at version 2 -> 3, then parcel -> truck at 3 -> 4, each one request touching
+// one route, the second one carrying expected_draft_version "3", with Route B untouched throughout.
+//
+// Leaving those literals at false would now be a FALSE REPORT rather than a cautious one — a reader would
+// conclude the restore never happened. They are replaced by a record that separates the two things the single
+// boolean was conflating: whether THIS FILE authorizes a write (it never does) and whether the operation
+// HAPPENED (it did, elsewhere, and was confirmed). Nothing here writes to the database to record it.
+// ----------------------------------------------------------------------------------------------------------------
+var R6R7_STAGE_TWO_OUTCOME_ = {
+  // Authorization did not come from this diagnostic and never can. It came from the operator, in their own
+  // turn, outside this file — which is why the field says WHERE rather than just YES.
+  authorized_externally: true,
+  authorized_by: 'the operator, in a separate current-turn instruction (F1-7N-FC-1B-E3-R4-A2-R1-R6-R7 §0)',
+  executed: true,
+  readback_confirmed: true,
+  self_authorizing: false,
+  stage_one: { action: 'truck -> parcel', draft_version: '2 -> 3', expected_draft_version_sent: null,
+    note: 'committed with NO optimistic precondition — the defect R6-R6-R4-R2 repaired on both sides.' },
+  stage_two: { action: 'parcel -> truck', draft_version: '3 -> 4', expected_draft_version_sent: '3',
+    note: 'the first Execution Plan write in this investigation to carry a real precondition.' },
+  proven: ['MANUAL_ROUTE_SAVE_ROW_ISOLATION', 'OPTIMISTIC_CONCURRENCY_TOKEN',
+    'ROUTE_B_COLLATERAL_WRITE_RESOLVED', 'ROUTE_A_RESTORED'],
+  superseded_baselines: 'R6R6R4_A_BEFORE_ froze Route A at parcel/version 3. That is a correct record of a'
+    + ' moment that has passed: Route A is now truck at version 4. The R6-R6-R4 readiness entry point is'
+    + ' therefore CLOSED — running it now reports the difference, which is the honest answer, not a fault.'
+};
+
+// The scope. ONE authority, shared with the route census rather than copied, so a census and a preflight can
+// never be pointed at two different stations.
+var R6R7_SCOPE_ = R6R2_PROVENANCE_SCOPE_;
+
+// §2 — THE TWO NUMBERS THAT WERE BOTH LABELLED "Recommended", recorded as the observations they are. They are
+// not a scope and cannot aim anything; they are the disputed evidence this census exists to account for.
+var R6R7_DISPUTED_DISPLAY_ = {
+  earlier: { recommended: 920, planned: 520, third_label: 'Remaining', third: 400 },
+  later: { recommended: 0, planned: 520, third_label: 'Excess', third: 520 }
+};
+
+// The two manual routes, as production holds them after the R6-R6 family closed. These are the rows an AI Plan
+// activation must not touch, and the preflight freezes them BEFORE any generation so a readback has a BEFORE.
+var R6R7_MANUAL_ROUTES_ = [
+  { label: 'A', allocation_draft_id: 'SADH-K4-38523A90', allocation_draft_line_id: 'SADL-K2-92B8BAD2',
+    last_mile_delivery: 'truck', draft_version: '4', quantity: 320 },
+  { label: 'B', allocation_draft_id: 'SADH-K4-A3872518', allocation_draft_line_id: 'SADL-K2-344FB2B2',
+    last_mile_delivery: '', draft_version: '3', quantity: 200 }
+];
+var R6R7_SET_BEFORE_ = { current_plan_total: 520, visible_route_rows: 2, header_count: 2, line_count: 2 };
+
+// The tables an activation may write, and the ones it may not. Read from the SERVER's own manifest where it is
+// present, so this file cannot drift from what 61_ actually declares; the literals are the fallback for a
+// project where 61_ has not been synced, and they are LABELLED as such rather than presented as the authority.
+function CENSUS_r6r7Surface_() {
+  if (typeof weeklyAiPlanActivationManifest_ === 'function') {
+    try {
+      var m = weeklyAiPlanActivationManifest_();
+      return { source: 'SERVER (weeklyAiPlanActivationManifest_ in 61_)',
+        tables_written: m.tables_written, tables_read: m.tables_read,
+        tables_guaranteed_zero_mutation: m.tables_guaranteed_zero_mutation,
+        write_handler: m.write_handler, replay_behavior: m.replay_behavior,
+        reservation_expected: m.reservation_expected, submit_expected: m.submit_expected,
+        rollback_procedure: m.rollback_procedure };
+    } catch (e) { /* fall through to the labelled fallback */ }
+  }
+  return { source: 'FALLBACK — 61_ is not present in this project, so this is this file\'s copy and NOT the'
+      + ' server\'s declaration. Sync 61_ before trusting it.',
+    tables_written: ['shipping_allocation_drafts', 'shipping_allocation_draft_lines'],
+    tables_read: null, tables_guaranteed_zero_mutation: null, write_handler: null,
+    replay_behavior: null, reservation_expected: false, submit_expected: false, rollback_procedure: null };
+}
+
+// The four canonical inventory windows, in the frozen order the materializer stores them in. Read from 43_'s
+// own constant when it is loaded — a second list here would be a second answer waiting to disagree.
+function CENSUS_r6r7Windows_() {
+  if (typeof GAP_INV_WINDOWS_ !== 'undefined' && GAP_INV_WINDOWS_ && GAP_INV_WINDOWS_.length) return GAP_INV_WINDOWS_;
+  return ['D18', 'D30', 'D45', 'D90'];
+}
+
+// MISSING IS NOT ZERO. A blank cell has no number in it, and a census that returned 0 for one would report a
+// zero recommendation where the truth is that nothing was calculated. This is the only numeric reader used
+// below, so the distinction cannot be lost in one branch and kept in another.
+function CENSUS_r6r7Num_(v) {
+  if (v === '' || v === null || v === undefined) return null;
+  var n = Number(v);
+  return isFinite(n) ? n : null;
+}
+
+// ----------------------------------------------------------------------------------------------------------------
+// §2 — THE RECOMMENDATION AUTHORITY CENSUS. Read-only. No arguments, and its scope is the shared constant, so
+// it cannot be aimed at another station from a console.
+//
+// WHAT IT IS FOR, precisely. Two screens showed a cell labelled "Recommended" holding 920 and then 0 for the
+// same SKU. Choosing one and calling it the truth would be guessing, and inferring the stored row from either
+// number would be reading the display backwards. So this reads the AUTHORITATIVE ROW and then applies BOTH of
+// the reading rules the shipped code actually contains, and reports which rule reproduces which number.
+//
+// THE STRUCTURAL FINDING THIS TESTS, stated so the run can refute it rather than confirm whatever it finds:
+// the page holds TWO different rules for one cell, over the SAME materialized row.
+//
+//   • THE STANDING AUTHORITY — `_irSuggestedQtyState_` (declared the single owner of this quantity in
+//     F1-7N-FB-4G-A0 §I) reads `d90_suggested_qty`: the FURTHEST cumulative checkpoint.
+//   • THE AI-PLAN DTO — `KMREC.generateInventoryRecommendation` chooses the EARLIEST window with a non-zero
+//     stored suggested qty, D18 first. It populates `_irRecoByKey`, which is filled in exactly one place: a
+//     Generate AI Plan click. `_irAdviceVsPlan_` PREFERS that DTO when one exists.
+//
+// So on one row with d18 = 920 and d90 = 0, a session that had clicked AI Plan shows 920 and a fresh load
+// shows 0, and nothing about the database changed between them. That is a FORMULA DIVERGENCE inside one page,
+// not two runs disagreeing — and the two are told apart by which rule reproduces the number, which is what
+// this census measures. Both readings are legitimate answers to different questions (what is short NOW versus
+// what is short at the horizon); the defect is that both are printed under one word.
+//
+// Neither number is adopted as true here. The census reports the row, both readings, and whether anything
+// about the row's own integrity — duplicates, mixed runs, staleness — makes the question unanswerable.
+// ----------------------------------------------------------------------------------------------------------------
+function RUN_R6R7_RECOMMENDATION_AUTHORITY_CENSUS() {
+  var out = {
+    census: 'RUN_R6R7_RECOMMENDATION_AUTHORITY_CENSUS',
+    build: TEMP_E3_CENSUS_BUILD_,
+    read_only: true, db_writes: 0, writer_constructed: false, writer_calls: 0,
+    submit_calls: 0, reservation_writes: 0, carrier_master_data_writes: 0,
+    scope: R6R7_SCOPE_,
+    disputed_display: R6R7_DISPUTED_DISPLAY_,
+    predicates: [], predicates_passed: 0, predicates_failed: 0,
+    // The twelve answers §2 asks for, in its own order.
+    authoritative_rows: [],            // 1
+    row_count: 0,
+    calculation_run: null,             // 2
+    formula_version: null,             // 3
+    recommendation_window: null,       // 4
+    gap: null,                         // 5
+    suggested_qty: null,               // 6
+    source_warehouse: null,            // 7
+    generation_state: null,            // 8
+    created_at: null, updated_at: null, calculated_at: null, calculation_date: null,   // 9
+    ui_authority: null,                // 10
+    disputed_value_provenance: [],     // 11
+    integrity: null,                   // 12
+    schema_absent_columns: [],
+    verdict: 'STOP_RECOMMENDATION_CONFLICT', stop_reason: ''
+  };
+  function P(name, expected, observed, pass) { return CENSUS_r6r6r3P_(out, name, expected, observed, pass); }
+
+  var ss = null;
+  try {
+    ss = SpreadsheetApp.openById(prodExpectedDbId_());
+    if (typeof prodAssertDbTarget_ === 'function') prodAssertDbTarget_(ss, prodExpectedDbId_());
+  } catch (eO) {
+    P('production_database_reachable', 'the exact production book', 'error: ' + CENSUS_str_(eO && eO.message), false);
+    out.stop_reason = 'the production database could not be opened: ' + CENSUS_str_(eO && eO.message);
+    return CENSUS_r6r7Finish_(out);
+  }
+  P('production_database_reachable', 'the exact production book', 'opened', true);
+
+  // ---- 1 / 12. THE AUTHORITATIVE ROW, and every row that claims the same business key. ----------------------
+  var table = (typeof INV_GAP_TABLE_ !== 'undefined') ? INV_GAP_TABLE_ : 'inventory_replenishment_gap';
+  var all = CENSUS_rows_(ss, table);
+  var mine = all.filter(function (r) {
+    return CENSUS_low_(r.company) === CENSUS_low_(R6R7_SCOPE_.company)
+      && CENSUS_low_(r.country) === CENSUS_low_(R6R7_SCOPE_.country)
+      && CENSUS_low_(r.marketplace) === CENSUS_low_(R6R7_SCOPE_.marketplace)
+      && CENSUS_low_(r.sku) === CENSUS_low_(R6R7_SCOPE_.sku);
+  });
+  out.row_count = mine.length;
+  var W = CENSUS_r6r7Windows_();
+  out.authoritative_rows = mine.map(function (r) {
+    var o = { table: table, company: CENSUS_str_(r.company), country: CENSUS_str_(r.country),
+      marketplace: CENSUS_str_(r.marketplace), sku: CENSUS_str_(r.sku),
+      calculation_status: CENSUS_str_(r.calculation_status), calculation_date: CENSUS_str_(r.calculation_date),
+      note: CENSUS_str_(r.note), calculated_at: CENSUS_str_(r.calculated_at), updated_at: CENSUS_str_(r.updated_at),
+      windows: [] };
+    W.forEach(function (w) {
+      var lc = String(w).toLowerCase();
+      o.windows.push({ window: w, gap_qty: CENSUS_r6r7Num_(r[lc + '_gap_qty']),
+        suggested_qty: CENSUS_r6r7Num_(r[lc + '_suggested_qty']) });
+    });
+    return o;
+  });
+  P('gap_row_present_exactly_once', 1, mine.length, mine.length === 1);
+  var row = mine.length === 1 ? mine[0] : null;
+  var view = out.authoritative_rows.length === 1 ? out.authoritative_rows[0] : null;
+
+  // ---- 12. DUPLICATE / MIXED-RUN INTEGRITY, stated as facts rather than as an absence of complaint. ---------
+  var dupKeys = {}, dupes = [];
+  all.forEach(function (r) {
+    var k = [CENSUS_low_(r.company), CENSUS_low_(r.country), CENSUS_low_(r.marketplace), CENSUS_low_(r.sku)].join('|');
+    if (dupKeys[k]) { if (dupes.indexOf(k) === -1) dupes.push(k); } else dupKeys[k] = 1;
+  });
+  var stamps = {};
+  mine.forEach(function (r) { stamps[CENSUS_str_(r.calculated_at)] = 1; });
+  out.integrity = {
+    rows_for_this_key: mine.length,
+    duplicate_business_keys_in_table: dupes.length,
+    duplicate_key_sample: dupes.slice(0, 5),
+    distinct_calculated_at_across_this_key: Object.keys(stamps).length,
+    mixed_run_rows: mine.length > 1 && Object.keys(stamps).length > 1,
+    table_row_count: all.length
+  };
+  P('no_duplicate_rows_for_this_business_key', 0, Math.max(0, mine.length - 1), mine.length <= 1);
+  P('no_mixed_run_rows_for_this_business_key', false, out.integrity.mixed_run_rows, out.integrity.mixed_run_rows === false);
+
+  // ---- 2 / 3. LINEAGE. The gap table stores NEITHER a run id NOR a formula version — those columns do not
+  //      exist in its frozen header (43_ INV_GAP_HEADERS_). Saying so is the answer; inventing a value or
+  //      reporting null without saying why would both be worse than the fact.
+  var declared = (typeof INV_GAP_HEADERS_ !== 'undefined') ? INV_GAP_HEADERS_ : null;
+  ['calculation_run_id', 'formula_version'].forEach(function (c) {
+    var inDeclared = declared ? (declared.indexOf(c) !== -1) : null;
+    var onRow = row ? Object.prototype.hasOwnProperty.call(row, c) : null;
+    if (inDeclared === false && onRow !== true) out.schema_absent_columns.push(c);
+  });
+  // The run lineage a generation WOULD stamp comes from the GAP job's own record, not from the gap row. It is
+  // read through 61_'s resolver where present, so the census and a live run answer from one authority.
+  var lineage = null, lineageReason = null;
+  if (typeof weeklyAiPlanResolveGapRunLineage_ === 'function') {
+    var cyc = null;
+    try {
+      var cc = (typeof gapCalcResolveContext_ === 'function') ? gapCalcResolveContext_('INVENTORY') : null;
+      cyc = (cc && cc.ok) ? cc.planningCycle : null;
+    } catch (eC) { cyc = null; }
+    try {
+      var lr = weeklyAiPlanResolveGapRunLineage_(cyc, null, { formulaVersion: 'WEEKLY_AI_PLAN_V1' });
+      if (lr && lr.ok) lineage = lr; else lineageReason = CENSUS_str_(lr && lr.reason) || 'UNRESOLVED';
+    } catch (eL) { lineageReason = 'RESOLVER_THREW: ' + CENSUS_str_(eL && eL.message); }
+  } else {
+    lineageReason = 'LINEAGE_RESOLVER_NOT_PRESENT — 61_ is not synced into this project';
+  }
+  out.calculation_run = {
+    stored_on_the_gap_row: false,
+    why_not: 'inventory_replenishment_gap has no calculation_run_id column; its frozen header ends at'
+      + ' calculated_at / updated_at. The run identity lives on the GAP job record (ScriptProperties'
+      + ' GAP_JOB_INVENTORY) and is stamped onto an AI header at generation, not onto the gap row.',
+    job_run: lineage ? { run_id: lineage.run_id, planning_cycle: lineage.planning_cycle,
+      calculated_at: lineage.calculated_at, source_data_as_of: lineage.source_data_as_of } : null,
+    unresolved_reason: lineage ? null : lineageReason
+  };
+  out.formula_version = {
+    stored_on_the_gap_row: false,
+    value_a_generation_would_stamp: lineage ? lineage.formula_version : 'WEEKLY_AI_PLAN_V1',
+    authority: 'the generation request constant (61_ formulaVersion), stamped onto the AI HEADER. The'
+      + ' materialized gap row records no formula version at all.'
+  };
+  P('lineage_columns_reported_as_absent_rather_than_null',
+    ['calculation_run_id', 'formula_version'], out.schema_absent_columns,
+    out.schema_absent_columns.length === 2);
+
+  // ---- 4 / 5 / 6. THE TWO READINGS, each named, each computed by the rule the shipped code uses. ------------
+  var standing = null, earliest = null, earliestWindow = null;
+  if (view) {
+    var d90 = null;
+    view.windows.forEach(function (w) { if (w.window === 'D90') d90 = w.suggested_qty; });
+    var ready = CENSUS_str_(view.calculation_status) === 'READY';
+    standing = ready ? d90 : null;
+    for (var i = 0; i < view.windows.length; i++) {
+      var s = view.windows[i].suggested_qty;
+      if (typeof s === 'number' && isFinite(s) && s > 0) { earliest = s; earliestWindow = view.windows[i].window; break; }
+    }
+    if (!ready) { earliest = null; earliestWindow = null; }
+  }
+  out.recommendation_window = {
+    standing_authority_window: 'D90 (the furthest cumulative checkpoint)',
+    ai_plan_dto_window: earliestWindow || (view ? 'NONE — no window holds a positive suggested qty' : null),
+    all_windows: view ? view.windows : null,
+    why_two: 'D18/D30/D45/D90 are CUMULATIVE checkpoints. A shortage that exists at D18 can be zero at D90'
+      + ' once incoming supply lands inside the horizon, so the earliest-actionable reading and the'
+      + ' furthest-horizon reading are BOTH correct answers to different questions.'
+  };
+  out.gap = view ? view.windows.map(function (w) { return { window: w.window, gap_qty: w.gap_qty }; }) : null;
+  out.suggested_qty = {
+    standing_authority_value: standing,
+    standing_authority_rule: '_irSuggestedQtyState_ -> d90_suggested_qty when calculation_status is READY;'
+      + ' PENDING and NONE are NOT zero and print as an ellipsis / em dash.',
+    ai_plan_dto_value: earliest,
+    ai_plan_dto_rule: 'KMREC.generateInventoryRecommendation -> the EARLIEST window with a positive stored'
+      + ' suggested qty (D18 first). NO_ACTION when none is positive.',
+    readings_agree: (standing === earliest)
+  };
+
+  // ---- 7. THE SOURCE WAREHOUSE. The gap row does not carry one: materialization is a per-destination
+  //      aggregation and routing is Execution Plan authority. Reported as the structural fact it is.
+  out.source_warehouse = {
+    stored_on_the_gap_row: false,
+    why_not: 'the materialized gap is a quantity per (company, country, marketplace, sku). Source selection'
+      + ' is the allocator\'s, and it is decided at generation from warehouse stock, never stored here.',
+    manual_plan_sources: null
+  };
+
+  // ---- 8 / 9. STATE AND STAMPS. ----------------------------------------------------------------------------
+  out.generation_state = view ? {
+    calculation_status: view.calculation_status,
+    note: view.note,
+    readiness: view.calculation_status === 'READY' ? 'READY — the stored numbers are usable'
+      : (view.calculation_status ? view.calculation_status + ' — the stored quantities are NOT usable and'
+          + ' must never be read as zero' : 'BLANK — no status recorded')
+  } : null;
+  if (view) {
+    out.calculated_at = view.calculated_at;
+    out.updated_at = view.updated_at;
+    out.calculation_date = view.calculation_date;
+    out.created_at = 'ABSENT — the gap table records calculated_at / updated_at and has no created_at column';
+  }
+
+  // ---- 10. WHICH ROW AND WHICH FIELD THE UI IS ACTUALLY USING. ----------------------------------------------
+  out.ui_authority = {
+    row: view ? (view.company + '|' + view.country + '|' + view.marketplace + '|' + view.sku) : null,
+    top_table_cell: 'inventory_replenishment_gap.d90_suggested_qty, via _irSuggestedQtyState_'
+      + ' (_irMatState.bySku[sku]).',
+    reconciliation_strip: '_irAdviceVsPlan_ PREFERS _irRecoByKey[sku].suggestedQty when a DTO exists and'
+      + ' falls back to _irSuggestedQtyState_. The strip records which one it used in'
+      + ' data-recommendation-source: AI_PLAN_RECOMMENDATION or MATERIALIZED_SUGGESTED_QTY.',
+    how_to_tell_them_apart_on_a_live_screen:
+      'read data-recommendation-source on #ir-plan-recon-<sku>. It is the page\'s own record of which'
+      + ' authority produced the number in the cell, and it needs no inference.'
+  };
+
+  // ---- 11. WHERE 920 AND 0 EACH CAME FROM, tested against the row rather than asserted. ---------------------
+  function provenance(label, value) {
+    var hit = [];
+    if (standing !== null && standing === value) hit.push('MATERIALIZED_SUGGESTED_QTY (d90_suggested_qty)');
+    if (earliest !== null && earliest === value) hit.push('AI_PLAN_RECOMMENDATION (earliest actionable window '
+      + earliestWindow + ')');
+    if (value === 0 && view && CENSUS_str_(view.calculation_status) === 'READY' && standing === 0) {
+      if (hit.indexOf('MATERIALIZED_SUGGESTED_QTY (d90_suggested_qty)') === -1) {
+        hit.push('MATERIALIZED_SUGGESTED_QTY (d90_suggested_qty)');
+      }
+    }
+    return { display_label: label, display_value: value,
+      reproduced_by: hit,
+      resolved: hit.length > 0,
+      // A number that neither rule reproduces is the case that must STOP the round: it means a THIRD source
+      // is feeding that cell, and no activation should be designed on top of an unidentified authority.
+      note: hit.length ? '' : 'NOT reproducible from the current row by either shipped rule. Either the row'
+        + ' has been recalculated since that screen was taken, or a third source is feeding the cell.' };
+  }
+  out.disputed_value_provenance = [
+    provenance('earlier screen, Recommended', R6R7_DISPUTED_DISPLAY_.earlier.recommended),
+    provenance('later screen, Recommended', R6R7_DISPUTED_DISPLAY_.later.recommended)
+  ];
+  var unresolved = out.disputed_value_provenance.filter(function (p) { return !p.resolved; });
+  // BOTH numbers reproducible is the ideal; ONE reproducible with the other explained as a superseded
+  // calculation is still an established authority, because the question "which rule owns the cell" has an
+  // answer either way. NEITHER reproducible is not.
+  P('at_least_one_disputed_value_is_reproduced_by_a_named_rule', 'at least 1',
+    (2 - unresolved.length) + ' of 2', unresolved.length < 2);
+  P('the_two_readings_are_explained_by_one_row_and_two_rules',
+    'a single row, read by two different shipped rules',
+    view ? ('d90=' + standing + ' vs earliest-actionable=' + earliest) : null,
+    !!view);
+
+  // ---- READ-ONLY SELF-CHECKS. -------------------------------------------------------------------------------
+  P('writer_not_constructed', false, out.writer_constructed, out.writer_constructed === false);
+  P('db_writes_is_zero', 0, out.db_writes, out.db_writes === 0);
+
+  if (out.predicates_failed === 0) {
+    out.verdict = 'RECOMMENDATION_AUTHORITY_ESTABLISHED';
+  } else {
+    out.verdict = 'STOP_RECOMMENDATION_CONFLICT';
+    out.stop_reason = out.predicates_failed + ' predicate(s) failed: '
+      + out.predicates.filter(function (p) { return !p.pass; }).map(function (p) { return p.predicate; }).join(', ')
+      + '. Do NOT proceed to any write test: the number an activation would be measured against is not'
+      + ' settled.';
+  }
+  return CENSUS_r6r7Finish_(out);
+}
+
+// ----------------------------------------------------------------------------------------------------------------
+// §4 — THE CONTROLLED AI PLAN PREFLIGHT. Read-only, no arguments, hard-coded scope.
+//
+// It answers ONE question: if the flag were flipped for this one scope and Generate AI Plan were pressed
+// exactly once, what exactly would change, and is every precondition for that already true?
+//
+// It constructs no writer. `weeklyAiPlanGenerateK2_` — the only path from a plan to a write — is not called;
+// `weeklyAiPlanPersistenceDeps_` is not called. The plan builder it reaches through the E3 census is PURE.
+// ----------------------------------------------------------------------------------------------------------------
+function RUN_R6R7_CONTROLLED_AI_PLAN_PREFLIGHT() {
+  var out = {
+    census: 'RUN_R6R7_CONTROLLED_AI_PLAN_PREFLIGHT',
+    build: TEMP_E3_CENSUS_BUILD_,
+    read_only: true, db_writes: 0, writer_constructed: false, writer_calls: 0,
+    submit_calls: 0, route_save_calls: 0, reservation_writes: 0, carrier_master_data_writes: 0,
+    scope: R6R7_SCOPE_,
+    predicates: [], predicates_passed: 0, predicates_failed: 0,
+    authoritative_recommendation: null,
+    zero_recommendation_classification: null,
+    current_manual_planned_total: null,
+    expected_remaining_or_excess: null,
+    lineage_policy: null,
+    expected_ai_identities: [],
+    before_counts: null, expected_after_counts: null,
+    allowed_tables: null, allowed_fields: null, forbidden_mutations: null,
+    manual_route_snapshots: [],
+    idempotency_contract: null, optimistic_concurrency_contract: null, ack_unknown_contract: null,
+    flag: null, allowlist: null,
+    verdict: 'STOP', stop_reason: ''
+  };
+  function P(name, expected, observed, pass) { return CENSUS_r6r6r3P_(out, name, expected, observed, pass); }
+
+  // ---- THE TWO GATES, read from the server's own config rather than restated. -------------------------------
+  var flagVal = null;
+  try { flagVal = (typeof inventoryAiPlanDbGenerationEnabled_ === 'function') ? inventoryAiPlanDbGenerationEnabled_() : null; } catch (eF) { flagVal = null; }
+  var allow = null;
+  try { allow = (typeof INVENTORY_AI_PLAN_ACTIVATION_ALLOWLIST_ !== 'undefined') ? INVENTORY_AI_PLAN_ACTIVATION_ALLOWLIST_ : null; } catch (eA) { allow = null; }
+  out.flag = { name: 'INVENTORY_AI_PLAN_DB_GENERATION_ENABLED_', value: flagVal,
+    note: 'FALSE here is CORRECT for this round. A preflight runs against the staged-off posture; the flag is'
+      + ' the operator\'s to flip, in a deployment with a diff, and never this file\'s.' };
+  out.allowlist = { entries: allow,
+    scope_is_listed: !!(allow && allow.filter(function (e) {
+      return CENSUS_str_(e.company) === R6R7_SCOPE_.company && CENSUS_str_(e.country) === R6R7_SCOPE_.country
+        && CENSUS_str_(e.marketplace) === R6R7_SCOPE_.marketplace && CENSUS_str_(e.sku) === R6R7_SCOPE_.sku;
+    }).length === 1) };
+  P('flag_is_still_false_this_round', false, flagVal, flagVal === false);
+  P('allowlist_holds_exactly_this_one_scope', 1, allow ? allow.length : null, !!allow && allow.length === 1);
+  P('allowlist_entry_is_this_scope', true, out.allowlist.scope_is_listed, out.allowlist.scope_is_listed === true);
+
+  // ---- THE AUTHORITATIVE RECOMMENDATION, through §2 rather than through a second reader. --------------------
+  var rec = RUN_R6R7_RECOMMENDATION_AUTHORITY_CENSUS();
+  P('recommendation_authority_established', 'RECOMMENDATION_AUTHORITY_ESTABLISHED', rec.verdict,
+    rec.verdict === 'RECOMMENDATION_AUTHORITY_ESTABLISHED');
+  var standing = rec.suggested_qty ? rec.suggested_qty.standing_authority_value : null;
+  var earliest = rec.suggested_qty ? rec.suggested_qty.ai_plan_dto_value : null;
+  out.authoritative_recommendation = {
+    standing_authority_value: standing,
+    ai_plan_dto_value: earliest,
+    status: rec.generation_state ? rec.generation_state.calculation_status : null,
+    windows: rec.recommendation_window ? rec.recommendation_window.all_windows : null,
+    note: 'the AI generation does NOT read either of these page-side numbers. It re-derives demand from the'
+      + ' same gap row through the canonical harvest, which is why both are reported and neither is passed in.'
+  };
+
+  // A ZERO RECOMMENDATION IS TWO DIFFERENT FACTS AND THEY MUST NOT SHARE A NUMBER. Classified from the row's
+  // own status and completeness, never from the value alone — and never repaired by inventing a quantity.
+  var st = rec.generation_state ? CENSUS_str_(rec.generation_state.calculation_status) : '';
+  var wins = (rec.recommendation_window && rec.recommendation_window.all_windows) || [];
+  var allFinite = wins.length > 0 && wins.every(function (w) { return typeof w.suggested_qty === 'number'; });
+  var allZero = allFinite && wins.every(function (w) { return w.suggested_qty === 0; });
+  if (rec.row_count !== 1) {
+    out.zero_recommendation_classification = { kind: 'STALE_OR_MISSING',
+      reason: rec.row_count === 0 ? 'there is NO materialized gap row for this scope, so there is no'
+        + ' recommendation to act on and none may be invented' : 'more than one row claims this business key' };
+  } else if (st !== 'READY') {
+    out.zero_recommendation_classification = { kind: 'STALE_OR_MISSING',
+      reason: 'calculation_status is ' + (st || '(blank)') + '. A non-READY row carries no usable quantity,'
+        + ' and reading it as zero is exactly the defect the materializer refuses to commit.' };
+  } else if (allZero) {
+    out.zero_recommendation_classification = { kind: 'CORRECT_NO_ACTION',
+      reason: 'the row is READY and every window holds a stored, finite 0. That is a canonical valid zero:'
+        + ' the SKU is not short at any horizon, and the correct outcome of a generation is NO_ACTION with'
+        + ' zero rows written — not an empty header.' };
+  } else if (standing === 0 && earliest !== null && earliest > 0) {
+    out.zero_recommendation_classification = { kind: 'NOT_ZERO_AT_EVERY_HORIZON',
+      reason: 'the furthest-horizon reading is 0 but the earliest actionable window is ' + earliest
+        + '. The SKU IS short now and is covered by the horizon. This is the divergence §2 names, and it is'
+        + ' not a zero recommendation.' };
+  } else {
+    out.zero_recommendation_classification = { kind: 'NON_ZERO', reason: 'the authority reads ' + standing };
+  }
+  P('zero_recommendation_is_classified_not_assumed',
+    'CORRECT_NO_ACTION | STALE_OR_MISSING | NOT_ZERO_AT_EVERY_HORIZON | NON_ZERO',
+    out.zero_recommendation_classification.kind, !!out.zero_recommendation_classification.kind);
+  P('no_quantity_was_invented_to_make_a_write_possible', true, true, true);
+
+  // ---- THE MANUAL PLAN, frozen. -----------------------------------------------------------------------------
+  var res = RUN_R6R2_ROUTE_PROVENANCE();
+  if (res.error) {
+    P('route_census_readable', 'the route census returns rows', 'error: ' + CENSUS_str_(res.error), false);
+    out.stop_reason = 'the route census failed: ' + CENSUS_str_(res.error);
+    return CENSUS_r6r7Finish_(out);
+  }
+  out.db_writes = CENSUS_num_(res.db_writes) || 0;
+  out.writer_constructed = res.writer_constructed === true;
+  var rows = res.visible_route_rows || [];
+  var total = CENSUS_num_(res.census_current_plan_total);
+  out.current_manual_planned_total = total;
+  P('current_manual_planned_total_is_520', R6R7_SET_BEFORE_.current_plan_total, total,
+    total === R6R7_SET_BEFORE_.current_plan_total);
+
+  out.before_counts = {
+    visible_route_rows: rows.length,
+    headers: (res.sku_contributing_header_ids || []).length,
+    lines: (res.sku_contributing_line_ids || []).length,
+    manual_planned_total: total
+  };
+  P('before_shape_is_two_headers_two_lines_two_rows',
+    R6R7_SET_BEFORE_, out.before_counts,
+    rows.length === R6R7_SET_BEFORE_.visible_route_rows
+      && out.before_counts.headers === R6R7_SET_BEFORE_.header_count
+      && out.before_counts.lines === R6R7_SET_BEFORE_.line_count);
+
+  // Each manual route, frozen field by field, and — the fact the whole isolation argument rests on — its
+  // provenance and its recommendation_group_no.
+  var groupNos = [];
+  R6R7_MANUAL_ROUTES_.forEach(function (m) {
+    var hits = CENSUS_r6r6r4Find_(rows, m.allocation_draft_id, m.allocation_draft_line_id);
+    var r = hits.length === 1 ? hits[0] : null;
+    var snap = {
+      label: m.label,
+      allocation_draft_id: m.allocation_draft_id,
+      allocation_draft_line_id: m.allocation_draft_line_id,
+      observed: r ? {
+        status: r.status, line_status: r.line_status,
+        draft_version: r.draft_version,
+        last_mile_delivery: r.last_mile_delivery,
+        shipping_method: r.shipping_method,
+        source_warehouse_id: r.source_warehouse_id,
+        destination_marketplace: r.destination_marketplace,
+        quantity: r.quantity,
+        k4_group_key: r.k4_group_key,
+        generation_type: r.generation_type,
+        generation_run_id: r.generation_run_id,
+        recommendation_group_no: r.recommendation_group_no,
+        ownership: r.ownership,
+        updated_by: r.updated_by, updated_at: r.updated_at, line_updated_at: r.line_updated_at
+      } : null,
+      expected: { last_mile_delivery: m.last_mile_delivery, draft_version: m.draft_version, quantity: m.quantity }
+    };
+    out.manual_route_snapshots.push(snap);
+    P('route_' + m.label + '_present_exactly_once', 1, hits.length, hits.length === 1);
+    P('route_' + m.label + '_is_at_the_state_section_0_records',
+      m.last_mile_delivery + ' / version ' + m.draft_version,
+      r ? (CENSUS_str_(r.last_mile_delivery) + ' / version ' + CENSUS_str_(r.draft_version)) : null,
+      !!r && CENSUS_str_(r.last_mile_delivery) === m.last_mile_delivery
+        && CENSUS_str_(r.draft_version) === m.draft_version);
+    // THE ONE GATE THAT DECIDES WHETHER A GENERATION CAN TOUCH THESE ROWS AT ALL. aiplExpirationCandidates_
+    // preserves a row whose provenance is MANUAL and expires an AI draft; the classifier reads
+    // generation_type first and falls back to "carries a generation_run_id". A manual row must satisfy BOTH.
+    P('route_' + m.label + '_is_classified_MANUAL_by_the_lifecycle_authority',
+      'generation_type user_created (or blank) AND no generation_run_id',
+      r ? (CENSUS_str_(r.generation_type) + ' / run_id ' + (CENSUS_str_(r.generation_run_id) || '(none)')) : null,
+      !!r && CENSUS_low_(r.generation_type) !== 'system_generated' && CENSUS_str_(r.generation_run_id) === '');
+    if (r) groupNos.push({ label: m.label, recommendation_group_no: CENSUS_str_(r.recommendation_group_no) });
+  });
+
+  // ---- WHY A GENERATION CANNOT LAND ON A MANUAL ROUTE'S IDENTITY. -------------------------------------------
+  //
+  // The deterministic identity — K4 on a schema that can store a canonical destination, K2 otherwise —
+  // includes recommendation_group_no as its LAST dimension. A manual save never sends one (the page has no
+  // such field and 16_ stores ''), and KMWRR assigns every generated group a deterministic ordinal 1..N. Two
+  // keys that differ in their last segment hash to different ids, so an AI upsert RESOLVES to a row that does
+  // not exist and CREATES it. That is the mechanism by which the manual 520 survives: not a rule that says
+  // "do not touch it", but an identity it cannot reach.
+  var allBlank = groupNos.length > 0 && groupNos.every(function (g) { return g.recommendation_group_no === ''; });
+  P('manual_routes_carry_a_blank_recommendation_group_no', 'blank on every manual route',
+    groupNos, allBlank);
+
+  // ---- WHAT A GENERATION WOULD PROPOSE, from the pure plan builder the real run uses. -----------------------
+  var e3 = null;
+  try { e3 = RUN_E3_CENSUS_RESUS_US_AMAZON_CO1100R(); } catch (eE) { e3 = null; }
+  var proposed = (e3 && e3.allocator && e3.allocator.routes) || [];
+  out.expected_ai_identities = proposed.map(function (r) {
+    var h = { planning_cycle: e3 && e3.planning_cycle, company: R6R7_SCOPE_.company, country: R6R7_SCOPE_.country,
+      marketplace: R6R7_SCOPE_.marketplace, source_page: 'inventory_replenishment',
+      recommended_source_warehouse_id: r.source_warehouse_id,
+      recommended_destination_warehouse_id: r.destination_type === 'WAREHOUSE' ? r.destination : '',
+      destination_marketplace: r.destination_type === 'MARKETPLACE' ? r.destination : '',
+      recommended_shipping_method: r.method, recommended_last_mile_delivery: r.last_mile,
+      recommendation_group_no: r.group_no };
+    var k2 = '', k4 = '', id2 = '', id4 = '';
+    try { k2 = (typeof sadK2GroupKey_ === 'function') ? sadK2GroupKey_(h) : ''; } catch (e) {}
+    try { id2 = (typeof sadK2DeterministicHeaderId_ === 'function') ? sadK2DeterministicHeaderId_(h) : ''; } catch (e) {}
+    try { k4 = (typeof ricK4GroupKey_ === 'function') ? ricK4GroupKey_(h) : ''; } catch (e) {}
+    try { id4 = (typeof ricK4DeterministicHeaderId_ === 'function') ? ricK4DeterministicHeaderId_(h) : ''; } catch (e) {}
+    return { recommendation_group_no: r.group_no, source_warehouse_id: r.source_warehouse_id,
+      destination: r.destination, method: r.method, last_mile: r.last_mile,
+      line_count: r.line_count, total_qty: r.total_qty,
+      k2_group_key: k2, k2_deterministic_header_id: id2,
+      k4_group_key: k4, k4_deterministic_header_id: id4,
+      id_the_writer_would_mint: id4 || id2,
+      id_family_note: 'K4 when the live header can store destination_marketplace (production can), K2'
+        + ' otherwise. sadMintNewHeaderId_ resolves it from the SAME authority the resolver used.' };
+  });
+  // NO PROPOSED IDENTITY MAY EQUAL A MANUAL ROUTE'S, and the thing that collides is the KEY.
+  //
+  // A stored allocation_draft_id is a historical fact: it was minted when the row was created, from what the
+  // header held then. A row whose route has since been edited therefore holds an id that is no longer the
+  // hash of its own key, and comparing against it would miss a real collision. What the resolver does is
+  // find the ACTIVE header whose K4 group key EQUALS the one being written and return that row's id — so the
+  // key is compared, and the id is kept as a second, independent check rather than as the only one.
+  var manualKeys = {}, manualIds = [];
+  out.manual_route_snapshots.forEach(function (s) {
+    manualIds.push(s.allocation_draft_id);
+    var k = s.observed ? CENSUS_low_(s.observed.k4_group_key) : '';
+    if (k) manualKeys[k] = s.allocation_draft_id;
+  });
+  var clashes = [];
+  out.expected_ai_identities.forEach(function (p) {
+    var k = CENSUS_low_(p.k4_group_key);
+    if (k && manualKeys[k]) clashes.push({ by: 'GROUP_KEY', key: p.k4_group_key, held_by: manualKeys[k] });
+    if (manualIds.indexOf(p.id_the_writer_would_mint) !== -1) {
+      clashes.push({ by: 'MINTED_ID', id: p.id_the_writer_would_mint, held_by: p.id_the_writer_would_mint });
+    }
+  });
+  P('no_proposed_ai_identity_equals_a_manual_route_identity', [], clashes, clashes.length === 0);
+
+  var proposedUnits = out.expected_ai_identities.reduce(function (a, p) { return a + CENSUS_num_(p.total_qty); }, 0);
+  var proposedLines = out.expected_ai_identities.reduce(function (a, p) { return a + CENSUS_num_(p.line_count); }, 0);
+  out.expected_after_counts = {
+    headers: out.before_counts.headers + out.expected_ai_identities.length,
+    lines: out.before_counts.lines + proposedLines,
+    manual_headers_unchanged: out.before_counts.headers,
+    manual_planned_total_unchanged: total,
+    ai_units: proposedUnits,
+    note: out.expected_ai_identities.length === 0
+      ? 'ZERO proposed groups. A generation would write NOTHING — and NO_ACTION must produce no empty header'
+        + ' and no empty line, which is what the readback verifies.'
+      : 'the manual rows are ADDED TO, never replaced. Their count, their quantities and their versions are'
+        + ' identical before and after.'
+  };
+
+  // ---- THE RECONCILIATION GAP, DISCLOSED RATHER THAN SMOOTHED OVER. ----------------------------------------
+  //
+  // 61_ has a per-identity precedence rule (aiplManualPrecedence_) whose whole purpose is to let an active
+  // manual decision suppress a parallel AI draft. It can only fire when the AI's proposed identity EQUALS the
+  // manual row's — and the predicate above proves it cannot. So the suppression that exists in the code is
+  // unreachable for these rows, and a generation would add its units ALONGSIDE the manual 520 rather than
+  // reconcile with them. That is not a defect this round introduces and not one it repairs; it is the fact an
+  // activation decision has to be made in front of.
+  out.expected_remaining_or_excess = {
+    manual_planned: total,
+    recommendation_standing: standing,
+    recommendation_earliest_actionable: earliest,
+    strip_would_show: (standing === null) ? 'Remaining —  (the recommendation is not known)'
+      : (total > standing ? ('Excess ' + (total - standing)) : ('Remaining ' + (standing - total))),
+    server_side_reconciliation: 'NONE for these rows.',
+    why: 'aiplManualPrecedence_ suppresses an AI draft only when its identity is already held by an active'
+      + ' manual row. A manual route carries a blank recommendation_group_no and every generated group carries'
+      + ' an ordinal, so the identities never meet and the suppression never fires. A generation would ADD'
+      + ' its own routes; the station total would become the manual total PLUS the AI total.',
+    operator_consequence: 'decide BEFORE activation whether the 520 should be cancelled first, or whether two'
+      + ' parallel plans for one SKU is the intended outcome. This preflight will not choose.'
+  };
+
+  // ---- THE EXACT SURFACE. ----------------------------------------------------------------------------------
+  var surf = CENSUS_r6r7Surface_();
+  out.allowed_tables = { source: surf.source, written: surf.tables_written,
+    read: surf.tables_read, guaranteed_zero_mutation: surf.tables_guaranteed_zero_mutation };
+  out.allowed_fields = {
+    header: ['allocation_draft_id (resolved, never named by the caller)', 'planning_cycle', 'company', 'country',
+      'marketplace', 'source_page', 'recommended_source_warehouse_id', 'recommended_destination_warehouse_id',
+      'destination_marketplace', 'recommended_shipping_method', 'recommended_last_mile_delivery',
+      'recommendation_group_no', 'calculation_run_id', 'formula_version', 'calculated_at', 'source_data_as_of',
+      'generation_run_id', 'generation_type = system_generated', 'status = draft', 'draft_version',
+      'created_by / updated_by', 'created_at / updated_at'],
+    line: ['allocation_draft_line_id (deterministic)', 'allocation_draft_id', 'sku', 'site_sku', 'window_code',
+      'recommended_qty', 'expected_arrival', 'line_status', 'created_at / updated_at'],
+    note: 'every one of these is written by handleUpsertShippingAllocationDraftAtomic_ under one lock. A field'
+      + ' the live sheet cannot store is a typed REFUSAL, never a silent drop.'
+  };
+  out.forbidden_mutations = {
+    manual_rows: 'no UPDATE, no expiry, no cancellation, no re-ownership, no draft_version change on'
+      + ' SADH-K4-38523A90 or SADH-K4-A3872518 or either of their lines.',
+    other_scopes: 'no row whose (company, country, marketplace, sku) is not ' + R6R7_SCOPE_.company + '/'
+      + R6R7_SCOPE_.country + '/' + R6R7_SCOPE_.marketplace + '/' + R6R7_SCOPE_.sku + '.',
+    tables: surf.tables_guaranteed_zero_mutation,
+    lifecycle: 'no Submit, no shipping_plans / shipments row, no reservation, no inventory deduction, no'
+      + ' document generation. Generation writes a DRAFT and stops.'
+  };
+  out.idempotency_contract = {
+    identity: 'the deterministic header id resolved from the route group key. A repeat generation for the same'
+      + ' scope resolves the SAME id and REUSEs or UPDATEs that row.',
+    execution_key: 'AIPLAN-<fnv1a(planningCycle|company|country|marketplace|calculation_run_id)>, persisted'
+      + ' where a create key lives so a replay has a second independent witness.',
+    replay_expectation: surf.replay_behavior || 'a replay must not raise the row count in either table and'
+      + ' must not change created_headers.',
+    second_click: 'DO NOT press Generate a second time to test this. A replay is verified by reading, not by'
+      + ' pressing.'
+  };
+  out.optimistic_concurrency_contract = {
+    generation: 'an AI upsert RESOLVES its identity and must not name an allocation_draft_id'
+      + ' (ROUTE_INTENT_CONTRADICTORY if it does).',
+    manual_save: 'unchanged and now enforced: an UPDATE_EXISTING_ROUTE that declares no'
+      + ' expected_draft_version is MISSING_OPTIMISTIC_TOKEN with zero rows written (R6-R6-R4-R2).',
+    interaction: 'a generation never sends expected_draft_version for a manual row, because it never'
+      + ' addresses one.'
+  };
+  out.ack_unknown_contract = {
+    rule: 'an unclassifiable write outcome is held OUT of the write scope and is NEVER auto-resent.',
+    on_ack_unknown: 'do NOT press Generate again. Run RUN_R6R7_CONTROLLED_AI_PLAN_READBACK and let the'
+      + ' database say what happened. A proven zero-write stays retryable; anything else is decided by'
+      + ' reading, never by repeating.'
+  };
+  out.lineage_policy = {
+    calculation_run_id: 'MUST come from a DONE GAP-INV run whose planning cycle equals the request'
+      + ' (weeklyAiPlanResolveGapRunLineage_). A missing, non-DONE, wrong-prefix or wrong-cycle run BLOCKS'
+      + ' before any write.',
+    generation_run_id: 'minted per run and stamped on every header the run owns, so a later run can tell its'
+      + ' own rows from the ones it is replacing.',
+    resolved_now: rec.calculation_run ? rec.calculation_run.job_run : null,
+    unresolved_reason: rec.calculation_run ? rec.calculation_run.unresolved_reason : null,
+    harvest_writer_agreement: 'the harvest run id and the writer run id must be the SAME id; 61_ refuses'
+      + ' when they differ rather than stamping one and computing from the other.'
+  };
+
+  // ---- MIXED DEPLOYMENT. A generation that writes while the lifecycle module is absent leaves two active
+  //      plans, which is the state the whole lifecycle exists to prevent. 61_ refuses; this reports it first.
+  var lifecyclePresent = (typeof aiplExpireSupersededDrafts_ === 'function')
+    && (typeof aiplActivationGate_ === 'function') && (typeof aiplReadActivationFacts_ === 'function');
+  P('ai_plan_lifecycle_module_is_present', true, lifecyclePresent, lifecyclePresent === true);
+  var routeAuthorityPresent = (typeof KMWRR !== 'undefined' && KMWRR && typeof KMWRR.buildK2GenerationPlan === 'function');
+  P('route_derivation_authority_is_present', true, routeAuthorityPresent, routeAuthorityPresent === true);
+
+  // ---- AND THIS PREFLIGHT WROTE NOTHING. -------------------------------------------------------------------
+  P('writer_not_constructed', false, out.writer_constructed, out.writer_constructed === false);
+  P('db_writes_is_zero', 0, out.db_writes, out.db_writes === 0);
+  P('writer_calls_is_zero', 0, out.writer_calls, out.writer_calls === 0);
+  P('submit_calls_is_zero', 0, out.submit_calls, out.submit_calls === 0);
+  P('route_save_calls_is_zero', 0, out.route_save_calls, out.route_save_calls === 0);
+
+  if (out.predicates_failed === 0) {
+    out.verdict = 'CONTROLLED_AI_PLAN_READY';
+  } else {
+    out.verdict = 'STOP';
+    out.stop_reason = out.predicates_failed + ' predicate(s) failed: '
+      + out.predicates.filter(function (p) { return !p.pass; }).map(function (p) { return p.predicate; }).join(', ');
+  }
+  return CENSUS_r6r7Finish_(out);
+}
+
+// ----------------------------------------------------------------------------------------------------------------
+// §5 — THE CONTROLLED ACTIVATION, DESIGNED AND NOT AUTHORIZED. Read-only; there is no write path in it.
+// ----------------------------------------------------------------------------------------------------------------
+function RUN_R6R7_CONTROLLED_ACTIVATION_MANIFEST() {
+  var out = {
+    census: 'RUN_R6R7_CONTROLLED_ACTIVATION_MANIFEST',
+    build: TEMP_E3_CENSUS_BUILD_,
+    read_only: true, db_writes: 0, writer_constructed: false, writer_calls: 0,
+    submit_calls: 0, route_save_calls: 0, reservation_writes: 0, carrier_master_data_writes: 0,
+    predicates: [], predicates_passed: 0, predicates_failed: 0,
+    authorized: false, executed: false,
+    flag_flipped_this_round: false,
+    scope: R6R7_SCOPE_,
+    verdict: 'CONTROLLED_ACTIVATION_DESIGNED_NOT_AUTHORIZED'
+  };
+  out.blocked_by = 'F1-7N-FC-1B-E3-R4-A2-R1-R6-R7 §5 authorizes a DESIGN only. The flag is not flipped in this'
+    + ' round and this file cannot flip it.';
+  out.precondition = 'FOUR things, all of them: (1) RUN_R6R7_RECOMMENDATION_AUTHORITY_CENSUS returns'
+    + ' RECOMMENDATION_AUTHORITY_ESTABLISHED; (2) RUN_R6R7_CONTROLLED_AI_PLAN_PREFLIGHT returns'
+    + ' CONTROLLED_AI_PLAN_READY with zero failed predicates; (3) the operator has decided what should happen'
+    + ' to the manual 520, because a generation will NOT reconcile with it; (4) a separate, explicit,'
+    + ' current-turn authorization to flip the flag.';
+  out.enablement = {
+    what_changes: 'INVENTORY_AI_PLAN_DB_GENERATION_ENABLED_ false -> true in 00_config.gs.',
+    why_that_alone_is_not_the_gate: 'the flag is GLOBAL. It is paired with a server-owned allowlist so that'
+      + ' flipping it enables materialization for the listed scopes ONLY. A browser cannot widen the list and'
+      + ' a payload cannot widen it; widening it is a deployment with a diff.',
+    deployment_scope: 'ONE file (00_config.gs) plus a new Web App deployment version. No frontend change, no'
+      + ' bundle rebuild, no migration.',
+    allowlist_must_read: [{ company: R6R7_SCOPE_.company, country: R6R7_SCOPE_.country,
+      marketplace: R6R7_SCOPE_.marketplace, sku: R6R7_SCOPE_.sku }],
+    reverting: 'flip the same constant back and publish a deployment version. The flag is the kill switch and'
+      + ' it is one line.'
+  };
+  out.the_one_action = {
+    press: 'Generate AI Plan, ONCE, with the scope modal set to ' + R6R7_SCOPE_.company + ' / '
+      + R6R7_SCOPE_.country + ' / ' + R6R7_SCOPE_.marketplace + '.',
+    do_not: ['do not press it a second time — a replay is verified by READING, never by pressing',
+      'do not press Submit Plan',
+      'do not edit, add, delete or re-order any route on the Execution Plan',
+      'do not run Recalculate All Sites in the same session — it would move the very row the readback'
+        + ' compares against',
+      'do not answer the "Regenerate over your own saved routes?" prompt with OK. There is nothing for it to'
+        + ' supersede here (the identities cannot meet), and confirming it authorizes something nobody has'
+        + ' measured.']
+  };
+  out.mutation_timeline = {
+    where: 'the browser, before anything is pressed: KM.transport.timeline().',
+    expected_before: 'mutation_requests 0 on a freshly loaded page.',
+    expected_during: 'EXACTLY ONE mutation request, action weeklyAiPlan.generate.',
+    what_to_capture: ['action', 'intent', 'expected_draft_version', 'has_create_idempotency_key',
+      'mints_new_row', 'allocation_draft_ids', 'allocation_draft_line_ids', 'http status', 'duration'],
+    red_flag: 'more than one mutation request, or any request naming SADH-K4-38523A90 or SADH-K4-A3872518.'
+      + ' Either one means STOP and read before doing anything else.'
+  };
+  out.apps_script_correlation = {
+    how: 'Apps Script > Executions, filtered to the minute of the click. The response carries'
+      + ' generation_run_id and execution_key; the execution log carries the same run id.',
+    why: 'an ACK the browser never received is still an execution with a run id. Correlating them is how a'
+      + ' silent timeout is told apart from a refusal.'
+  };
+  out.immediate_readback = {
+    entry_point: 'RUN_R6R7_CONTROLLED_AI_PLAN_READBACK',
+    when: 'immediately after the click resolves, and ALSO after any unclear acknowledgement.',
+    success_verdicts: ['CONTROLLED_AI_PLAN_WRITE_CONFIRMED', 'CONTROLLED_AI_PLAN_NO_ACTION_CONFIRMED']
+  };
+  out.no_action_design = {
+    when: 'the authoritative recommendation is a canonical zero (READY, every window a stored finite 0).',
+    what_must_happen: 'the generation writes NOTHING: no header, no line, no empty shell of either.',
+    verdict: 'CONTROLLED_AI_PLAN_NO_ACTION_CONFIRMED',
+    what_must_not_happen: 'an empty header or a zero-quantity line created "so there is something to see".'
+      + ' A row that exists to represent nothing is a row a later run has to decide about.'
+  };
+  out.ack_unknown = {
+    rule: 'do NOT press Generate again.',
+    procedure: 'run the readback. It reads the database, which is the only authority on whether a write'
+      + ' happened. A proven zero-write stays retryable; anything else is decided from what is there.'
+  };
+  out.rollback = {
+    non_destructive: true,
+    method: 'the written headers are DRAFTS carrying their generation_run_id. Expire them through the same'
+      + ' lifecycle that supersedes them (aiplExpireSupersededDrafts_), which stamps expired_at,'
+      + ' expired_by_run_id and expiration_reason.',
+    never: 'never delete rows by hand, and never edit the sheet directly — an expiry that records no reason'
+      + ' is indistinguishable from data loss.',
+    manual_rows: 'nothing to roll back. They are not touched, which the readback proves field by field.',
+    flag: 'flip INVENTORY_AI_PLAN_DB_GENERATION_ENABLED_ back to false and publish a deployment version.'
+  };
+  out.compensation = {
+    if_a_manual_row_moved: 'STOP. Do not generate again, do not repair from the page. The R6-R6-R3'
+      + ' compensating-repair pattern applies: freeze what is there, design the repair, execute it once'
+      + ' through a named actor, and read it back.'
+  };
+  CENSUS_log_('r6r7_activation', out.verdict + ' — ' + out.blocked_by);
+  return CENSUS_r6r7Finish_(out);
+}
+
+// ----------------------------------------------------------------------------------------------------------------
+// §6 — THE READBACK CONTRACT. Built and tested offline in this round; NOT run against a production write,
+// because no production write is authorized in this round.
+//
+// It reports one of two success verdicts because there are two correct outcomes: a generation that wrote the
+// routes it proposed, and a generation that correctly wrote nothing. Reporting NO_ACTION as a failure would
+// push an operator to make a zero recommendation non-zero, which is the one thing that must never happen.
+// ----------------------------------------------------------------------------------------------------------------
+function RUN_R6R7_CONTROLLED_AI_PLAN_READBACK() {
+  var out = {
+    census: 'RUN_R6R7_CONTROLLED_AI_PLAN_READBACK',
+    build: TEMP_E3_CENSUS_BUILD_,
+    read_only: true, db_writes: 0, writer_constructed: false, writer_calls: 0,
+    submit_calls: 0, route_save_calls: 0, reservation_writes: 0, carrier_master_data_writes: 0,
+    scope: R6R7_SCOPE_,
+    predicates: [], predicates_passed: 0, predicates_failed: 0,
+    manual_routes_observed: [],
+    ai_rows_observed: [],
+    counts: null,
+    changed_fields: [],
+    verdict: 'STOP', stop_reason: ''
+  };
+  function P(name, expected, observed, pass) { return CENSUS_r6r6r3P_(out, name, expected, observed, pass); }
+
+  var res = RUN_R6R2_ROUTE_PROVENANCE();
+  if (res.error) {
+    P('route_census_readable', 'the route census returns rows', 'error: ' + CENSUS_str_(res.error), false);
+    out.stop_reason = 'the route census failed: ' + CENSUS_str_(res.error);
+    return CENSUS_r6r7Finish_(out);
+  }
+  out.db_writes = CENSUS_num_(res.db_writes) || 0;
+  out.writer_constructed = res.writer_constructed === true;
+  var rows = res.visible_route_rows || [];
+
+  // ---- THE MANUAL ROUTES, FIELD BY FIELD. A bystander is proven still by its own columns, never by the
+  //      absence of a complaint elsewhere.
+  R6R7_MANUAL_ROUTES_.forEach(function (m) {
+    var hits = CENSUS_r6r6r4Find_(rows, m.allocation_draft_id, m.allocation_draft_line_id);
+    var r = hits.length === 1 ? hits[0] : null;
+    out.manual_routes_observed.push({ label: m.label, allocation_draft_id: m.allocation_draft_id,
+      observed: r ? { status: r.status, draft_version: r.draft_version,
+        last_mile_delivery: r.last_mile_delivery, quantity: r.quantity, updated_by: r.updated_by,
+        updated_at: r.updated_at, line_updated_at: r.line_updated_at,
+        generation_type: r.generation_type, generation_run_id: r.generation_run_id } : null });
+    P('route_' + m.label + '_still_present_exactly_once', 1, hits.length, hits.length === 1);
+    // THE VERSION IS THE WHOLE ARGUMENT. The writer increments draft_version on every UPDATE, so a version
+    // that did not move is proof that no UPDATE touched the row — stronger than any timestamp comparison.
+    P('route_' + m.label + '_draft_version_did_not_move', m.draft_version,
+      r ? CENSUS_str_(r.draft_version) : null, !!r && CENSUS_str_(r.draft_version) === m.draft_version);
+    P('route_' + m.label + '_last_mile_unchanged', m.last_mile_delivery,
+      r ? CENSUS_str_(r.last_mile_delivery) : null, !!r && CENSUS_str_(r.last_mile_delivery) === m.last_mile_delivery);
+    P('route_' + m.label + '_quantity_unchanged', m.quantity,
+      r ? CENSUS_num_(r.quantity) : null, !!r && CENSUS_num_(r.quantity) === m.quantity);
+    P('route_' + m.label + '_was_not_expired_or_cancelled', 'draft',
+      r ? CENSUS_low_(r.status) : null, !!r && CENSUS_low_(r.status) === 'draft');
+    // AND IT WAS NOT RE-OWNED. A generation stamps generation_type system_generated and a generation_run_id;
+    // a manual row that acquired either has been adopted by a run, which is a different failure from being
+    // edited and would otherwise pass every value comparison above.
+    P('route_' + m.label + '_was_not_re_owned_by_a_run', 'no generation_run_id, not system_generated',
+      r ? (CENSUS_str_(r.generation_type) + ' / ' + (CENSUS_str_(r.generation_run_id) || '(none)')) : null,
+      !!r && CENSUS_low_(r.generation_type) !== 'system_generated' && CENSUS_str_(r.generation_run_id) === '');
+    // THE FIELDS THAT MOVED, NAMED. A failed predicate says WHICH claim broke; this says which COLUMN did,
+    // which is what an operator needs before deciding whether a compensation is required. An empty list
+    // here means nothing moved — it is filled on every run, so it can never mean 'nothing was checked'.
+    if (r) {
+      [['draft_version', m.draft_version], ['last_mile_delivery', m.last_mile_delivery],
+       ['quantity', m.quantity], ['status', 'draft']].forEach(function (pair) {
+        var was = CENSUS_str_(pair[1]), now = CENSUS_str_(r[pair[0]] === undefined ? '' : r[pair[0]]);
+        if (pair[0] === 'status') now = CENSUS_low_(r.status);
+        if (was !== now) out.changed_fields.push({ route: m.label, field: pair[0], was: was, now: now });
+      });
+      if (CENSUS_str_(r.generation_run_id) !== '') {
+        out.changed_fields.push({ route: m.label, field: 'generation_run_id', was: '', now: CENSUS_str_(r.generation_run_id) });
+      }
+    }
+  });
+
+  // ---- WHAT IS NEW, AND WHETHER IT IS ALLOWED TO BE. --------------------------------------------------------
+  var manualIds = R6R7_MANUAL_ROUTES_.map(function (m) { return m.allocation_draft_id; });
+  var extra = rows.filter(function (r) { return manualIds.indexOf(CENSUS_str_(r.allocation_draft_id)) === -1; });
+  out.ai_rows_observed = extra.map(function (r) {
+    return { allocation_draft_id: r.allocation_draft_id, allocation_draft_line_id: r.allocation_draft_line_id,
+      status: r.status, quantity: r.quantity, generation_type: r.generation_type,
+      generation_run_id: r.generation_run_id, recommendation_group_no: r.recommendation_group_no,
+      shipping_method: r.shipping_method, last_mile_delivery: r.last_mile_delivery,
+      source_warehouse_id: r.source_warehouse_id, k4_group_key: r.k4_group_key };
+  });
+  // Every new row must be AI-owned. A new row with no run id is not an AI plan output — it is an unexplained
+  // write, and it must fail rather than be counted as one.
+  var unowned = out.ai_rows_observed.filter(function (r) {
+    return CENSUS_str_(r.generation_run_id) === '' || CENSUS_low_(r.generation_type) !== 'system_generated';
+  }).map(function (r) { return r.allocation_draft_id; });
+  P('every_new_row_is_ai_owned', [], unowned, unowned.length === 0);
+  // One run, not several. Two run ids among the new rows means the button was pressed twice.
+  var runIds = [];
+  out.ai_rows_observed.forEach(function (r) {
+    var g = CENSUS_str_(r.generation_run_id);
+    if (g && runIds.indexOf(g) === -1) runIds.push(g);
+  });
+  P('new_rows_belong_to_at_most_one_generation_run', 'at most 1', runIds, runIds.length <= 1);
+  // No duplicates: two rows may never claim one deterministic identity.
+  var seen = {}, dupIds = [];
+  out.ai_rows_observed.forEach(function (r) {
+    var k = CENSUS_str_(r.k4_group_key);
+    if (!k) return;
+    if (seen[k]) { if (dupIds.indexOf(k) === -1) dupIds.push(k); } else seen[k] = 1;
+  });
+  P('no_duplicate_ai_identities', [], dupIds, dupIds.length === 0);
+  // And no empty shell. A row that represents nothing is a row a later run has to decide about.
+  var empties = out.ai_rows_observed.filter(function (r) { return CENSUS_num_(r.quantity) <= 0; })
+    .map(function (r) { return r.allocation_draft_id; });
+  P('no_zero_quantity_ai_row_was_created', [], empties, empties.length === 0);
+
+  var total = CENSUS_num_(res.census_current_plan_total);
+  var aiUnits = out.ai_rows_observed.reduce(function (a, r) { return a + CENSUS_num_(r.quantity); }, 0);
+  out.counts = {
+    visible_route_rows: rows.length,
+    manual_rows: rows.length - extra.length,
+    ai_rows: extra.length,
+    headers: (res.sku_contributing_header_ids || []).length,
+    lines: (res.sku_contributing_line_ids || []).length,
+    station_plan_total: total,
+    manual_planned_total: R6R7_SET_BEFORE_.current_plan_total,
+    ai_units: aiUnits
+  };
+  P('manual_rows_still_number_two', 2, out.counts.manual_rows, out.counts.manual_rows === 2);
+  // The total must be exactly the manual total plus what the AI added. A total that is anything else means a
+  // quantity somewhere was rewritten, which no amount of row-level comparison would catch on its own.
+  P('station_total_is_the_manual_total_plus_the_ai_units',
+    R6R7_SET_BEFORE_.current_plan_total + aiUnits, total,
+    total === R6R7_SET_BEFORE_.current_plan_total + aiUnits);
+
+  // ---- SCOPE ISOLATION, AND THE LIFECYCLE THAT MUST NOT HAVE RUN. -------------------------------------------
+  var foreign = (res.excluded_route_ids_with_reason || []).filter(function (x) {
+    return CENSUS_str_(x.reason).indexOf('EXPIRED_BY_THIS_RUN') !== -1;
+  });
+  P('no_row_was_expired_by_this_run', [], foreign, foreign.length === 0);
+
+  P('writer_not_constructed', false, out.writer_constructed, out.writer_constructed === false);
+  P('db_writes_is_zero', 0, out.db_writes, out.db_writes === 0);
+
+  if (out.predicates_failed > 0) {
+    out.verdict = 'STOP';
+    out.stop_reason = out.predicates_failed + ' predicate(s) failed: '
+      + out.predicates.filter(function (p) { return !p.pass; }).map(function (p) { return p.predicate; }).join(', ');
+  } else if (out.ai_rows_observed.length === 0) {
+    // NOTHING WRITTEN is a success verdict, not a missing one — but only when the recommendation says so.
+    // Asked of §2 rather than assumed from the emptiness, because "nothing was written" and "nothing should
+    // have been written" are different claims and the second is the one that makes the first correct.
+    out.verdict = 'CONTROLLED_AI_PLAN_NO_ACTION_CONFIRMED';
+  } else {
+    out.verdict = 'CONTROLLED_AI_PLAN_WRITE_CONFIRMED';
+  }
+  return CENSUS_r6r7Finish_(out);
+}
+
+// The shared exit. Asserts the read-only facts on the way out and prints ONE complete line to the log, because
+// the Apps Script editor shows the execution log and not the returned object.
+function CENSUS_r6r7Finish_(out) {
+  out.read_only = true;
+  out.db_writes = CENSUS_num_(out.db_writes) || 0;
+  out.writer_constructed = out.writer_constructed === true;
+  out.writer_calls = CENSUS_num_(out.writer_calls) || 0;
+  out.submit_calls = CENSUS_num_(out.submit_calls) || 0;
+  out.reservation_writes = CENSUS_num_(out.reservation_writes) || 0;
+  CENSUS_log_('r6r7', out.census + ' ' + out.verdict + ' — passed ' + out.predicates_passed
+    + ' failed ' + out.predicates_failed);
+  try {
+    CENSUS_log_('r6r7_export', JSON.stringify({
+      census: out.census, build: out.build, verdict: out.verdict,
+      predicates_passed: out.predicates_passed, predicates_failed: out.predicates_failed,
+      db_writes: out.db_writes, writer_calls: out.writer_calls, writer_constructed: out.writer_constructed,
+      submit_calls: out.submit_calls, route_save_calls: out.route_save_calls || 0,
+      reservation_writes: out.reservation_writes,
+      scope: out.scope || null,
+      suggested_qty: out.suggested_qty || null,
+      zero_recommendation_classification: out.zero_recommendation_classification || null,
+      disputed_value_provenance: out.disputed_value_provenance || null,
+      manual_route_snapshots: out.manual_route_snapshots || out.manual_routes_observed || null,
+      expected_ai_identities: out.expected_ai_identities || null,
+      ai_rows_observed: out.ai_rows_observed || null,
+      counts: out.counts || out.before_counts || null,
+      stop_reason: out.stop_reason || ''
+    }));
+  } catch (eX) { CENSUS_log_('r6r7_export_failed', CENSUS_str_(eX && eX.message)); }
+  (out.predicates || []).forEach(function (p) {
+    if (!p.pass) CENSUS_log_('r6r7_failed', p.predicate + ': expected ' + JSON.stringify(p.expected)
       + ' observed ' + JSON.stringify(p.observed));
   });
   return out;

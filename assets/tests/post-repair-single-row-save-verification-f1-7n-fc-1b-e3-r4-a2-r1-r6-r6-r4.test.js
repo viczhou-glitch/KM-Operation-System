@@ -407,7 +407,10 @@ ok(RD.frozen_snapshot_source.indexOf(TS_COMPENSATED) !== -1,
   ok(RD.predicates.some(function (p) { return p.predicate === n && p.pass; }), 'R4' + '.abc'[i] + ' ' + n);
 });
 eq(RD.already_saved, false, 'R5  and the authorized edit has not already been performed');
-eq(RD.stage_two_authorized, false, 'R5a stage two is not authorized by a readiness that succeeded');
+// R6-R7 §0 — stage two HAS happened, so a constant false here would be a false report. What this line
+// owns is that a READINESS does not authorize anything, and that is asserted directly instead.
+eq(RD.stage_two_authorized_by_this_file, false,
+  'R5a a readiness that succeeded still authorizes nothing — READY is a state, never a permission');
 
 // The plan-shape and write-path predicates, each present and passing.
 ['current_plan_total_is_520', 'visible_route_rows_is_2', 'header_count_is_2', 'line_count_is_2',
@@ -651,7 +654,8 @@ eq(RB.k4_expected_after, K4_A_TRUCK, 'S5  the expected key was DERIVED by substi
 eq(RB.k4_actual_after, K4_A_TRUCK, 'S5a and production agrees');
 ok(RB.ui_note.indexOf('displayed') !== -1 || RB.ui_note.indexOf('DISPLAY') !== -1,
   'S6  and the verdict states that a displayed last mile is not a stored one');
-eq(RB.stage_two_authorized, false, 'S6a stage two is still not authorized by a confirmed stage one');
+eq(RB.stage_two_authorized_by_this_file, false,
+  'S6a and neither does a confirmed readback — the authority for stage two was never this file\'s');
 
 // ================================================================================================================
 section('§8e — THE READBACK CATCHES EVERY WAY THE SAVE COULD GO WRONG');
@@ -835,12 +839,19 @@ ok(!/\bfor\s*\(|\bwhile\s*\(|\bdo\s*{/.test(writeFn),
   'M8b with no loop anywhere in it, so there is no retry to reach');
 
 // ================================================================================================================
-section('§7 — STAGE TWO IS DESIGNED AND NOT AUTHORIZED');
+section('§7 — STAGE TWO, NOW THE HISTORICAL RECORD OF AN OPERATION THAT HAPPENED');
 // ================================================================================================================
 var wS = new World();
 var ST = wS.run('RUN_R6R6R4_RESTORE_STAGE_TWO_MANIFEST').res;
-eq(ST.verdict, 'STAGE_TWO_DESIGNED_NOT_AUTHORIZED', 'T1  the manifest says exactly what it is');
-eq([ST.authorized, ST.executed], [false, false], 'T1a authorized false, executed false');
+// R6-R7 §0 — the manifest is now a RECORD, not a request. The two booleans were correct when they were
+// written and became a false report the moment the restore ran; what they were really asserting is that
+// the diagnostic is not self-authorizing, and that is the claim kept here.
+eq(ST.verdict, 'STAGE_TWO_EXECUTED_AND_CONFIRMED', 'T1  the manifest says exactly what it is');
+eq([ST.authorized, ST.executed, ST.readback_confirmed], [true, true, true],
+  'T1a authorized externally, executed, and read back');
+eq(ST.self_authorizing, false, 'T1a1 while the file itself authorized none of it');
+ok(/the operator/.test(ST.outcome.authorized_by),
+  'T1a2 and the authorization is attributed to the operator, outside this file');
 eq(wS.dbWrites(), 0, 'T1b and running it wrote nothing');
 eq([ST.expected.route_a_last_mile_before, ST.expected.route_a_last_mile_after], ['parcel', 'truck'],
   'T2  the restore is parcel -> truck');
@@ -1159,11 +1170,10 @@ mut('N8  the readiness declaring READY while a predicate failed', function () {
     .run('RUN_R6R6R4_SINGLE_ROW_SAVE_READINESS').res;
   return r.verdict === 'SINGLE_ROW_SAVE_READY' && r.predicates_failed > 0;
 });
-mut('N9  the stage-two manifest reporting itself as authorized', function () {
-  var m = swap(CENSUS, "    authorized: false,          // ALWAYS false in this round.",
-                       "    authorized: true,           // ALWAYS false in this round.");
+mut('N9  the stage-two manifest reporting itself as the authority for the restore', function () {
+  var m = swap(CENSUS, '    self_authorizing: false,', '    self_authorizing: true,');
   var r = withCensus(m).run('RUN_R6R6R4_RESTORE_STAGE_TWO_MANIFEST').res;
-  return r.authorized === true && ST.authorized === false;
+  return r.self_authorizing === true && ST.self_authorizing === false;
 });
 mut('N10 the mutation audit dropping the intent it was added to report', function () {
   var src = extractFn(DBAPI, '_kmMutationShape_');
